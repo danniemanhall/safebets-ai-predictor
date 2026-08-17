@@ -10,38 +10,21 @@ from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, V
 
 st.set_page_config(page_title="SafeBets Master Multi-Horizon Predictor", page_icon="📈", layout="wide")
 
-# --- 1. SECURE CONFIGURATION & HEALTH CHECK ---
+# --- 1. SECURE CONFIGURATION (NO STARTUP API CALLS) ---
 password = st.text_input("Enter Password", type="password")
 if password != "admin123":
     st.warning("Please enter the password to access the dashboard.")
     st.stop()
 
 ai_enabled = False
-gemini = None
 
 if "GEMINI_API_KEY" in st.secrets and str(st.secrets["GEMINI_API_KEY"]).strip():
     try:
         genai.configure(api_key=str(st.secrets["GEMINI_API_KEY"]).strip())
-        
-        # Test candidate models with fallback
-        candidate_models = ['gemini-flash-latest', 'gemini-1.5-flash', 'gemini-2.0-flash']
-        for m_name in candidate_models:
-            try:
-                test_model = genai.GenerativeModel(m_name)
-                res = test_model.generate_content("1")
-                if res and res.text:
-                    gemini = test_model
-                    ai_enabled = True
-                    st.sidebar.success(f"✅ Gemini Connected ({m_name})")
-                    break
-            except Exception:
-                time.sleep(2)  # Space out test pings to avoid triggering 429 on startup
-                continue
-
-        if not ai_enabled:
-            st.sidebar.error("❌ Gemini API key valid, but rate-limited at startup. Wait 1 min and refresh.")
+        ai_enabled = True
+        st.sidebar.success("✅ Gemini API Key Configured")
     except Exception as e:
-        st.sidebar.error(f"❌ Gemini Init Error: {e}")
+        st.sidebar.error(f"❌ Gemini Setup Error: {e}")
 else:
     st.sidebar.error("❌ GEMINI_API_KEY missing in Secrets")
 
@@ -63,9 +46,9 @@ asset_map = {
     "Comm - GOLD": "GC=F", "Comm - SILVER": "SI=F", "Comm - WTI": "CL=F", "Comm - COPPER": "HG=F"
 }
 
-# --- 3. RETRY-ENABLED SENTIMENT ENGINE ---
+# --- 3. ROBUST SENTIMENT ENGINE WITH MODEL FALLBACK ---
 def get_news_sentiment(ticker_symbol, asset_name):
-    if not ai_enabled or gemini is None:
+    if not ai_enabled:
         return 0.0, "API key missing/failed"
     
     try:
@@ -96,28 +79,26 @@ def get_news_sentiment(ticker_symbol, asset_name):
         Example: 0.55
         """
         
-        # 3-Attempt Retry Loop for 429 Rate Limits
-        max_retries = 3
-        for attempt in range(max_retries):
+        # Primary and fallback endpoints to prevent 404s
+        models_to_try = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro']
+        
+        for model_name in models_to_try:
             try:
-                response = gemini.generate_content(prompt)
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt)
                 text = response.text.strip() if response and response.text else ""
                 
                 match = re.search(r"[-+]?\d*\.\d+|\d+", text)
                 if match:
                     score = float(match.group())
                     return max(-1.0, min(1.0, score)), "OK"
-                return 0.0, f"Parse error ({text[:15]})"
             except Exception as e:
-                err_msg = str(e)
-                if "429" in err_msg or "quota" in err_msg.lower():
-                    if attempt < max_retries - 1:
-                        time.sleep(5)  # Pause 5 seconds on 429 error and retry
-                        continue
-                    return 0.0, "429 Rate Limit Exceeded"
-                return 0.0, f"API Error: {err_msg[:25]}"
+                err_str = str(e)
+                if "429" in err_str or "quota" in err_str.lower():
+                    time.sleep(5)  # Pause if hitting free tier speed limit
+                continue
                 
-        return 0.0, "Max Retries Exceeded"
+        return 0.0, "API Rate/Model Error"
     except Exception as e:
         return 0.0, f"Error: {str(e)[:20]}"
 
@@ -243,7 +224,7 @@ if st.button("🚀 Run All-Assets Analysis"):
             })
         
         progress_bar.progress((idx + 1) / total_assets)
-        time.sleep(4)  # 4-second delay keeps execution under 15 requests/minute
+        time.sleep(4)  # 4-second delay prevents hitting the 15 RPM limit
         
     status_text.text("Analysis complete!")
     st.success("Master Market Sweep Complete!")
