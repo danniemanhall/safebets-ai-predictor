@@ -75,6 +75,12 @@ sentiment_weight = st.sidebar.slider(
          "and that has not been validated. Raise it only after backtesting."
 )
 show_bands = st.sidebar.checkbox("Show 80% ranges", value=True)
+use_live = st.sidebar.checkbox(
+    "Anchor on live price", value=True,
+    help="Anchor every submission on the freshest price available rather than "
+         "the daily close. For 24/7 assets the close can be hours old, and that "
+         "gap is pure avoidable error."
+)
 
 # --- 2. ASSET MAP ---
 asset_map = {
@@ -432,6 +438,37 @@ def walk_forward_compare(X, y, days, n_folds):
     }
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def get_live_price(ticker_symbol):
+    """
+    Fetch the freshest price available, with fallbacks.
+
+    This matters more than any model here. Every candidate is anchored on
+    "today's price", and the daily close from yfinance can be hours stale for
+    a 24/7 asset. Anchoring on a stale close adds the market's drift since
+    that close to every submission, on top of the irreducible error -- and
+    that gap is often larger than any edge the model was competing for.
+
+    Returns (price, source) or (None, reason).
+    """
+    try:
+        info = yf.Ticker(ticker_symbol).fast_info
+        price = info.get("last_price") if hasattr(info, "get") else getattr(info, "last_price", None)
+        if price and float(price) > 0:
+            return float(price), "live"
+    except Exception:
+        pass
+
+    try:
+        intraday = yf.Ticker(ticker_symbol).history(period="1d", interval="1m")
+        if not intraday.empty:
+            return float(intraday['Close'].iloc[-1]), "1m bar"
+    except Exception:
+        pass
+
+    return None, "stale close"
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_predictions(ticker_symbol, shrink_enabled=True, folds=DEFAULT_FOLDS):
     try:
@@ -485,6 +522,8 @@ def get_predictions(ticker_symbol, shrink_enabled=True, folds=DEFAULT_FOLDS):
 
             results[name] = {
                 'price': latest_price * float(np.exp(effective_log)),
+                'log_offset': effective_log,
+                'sigma': horizon_sigma,
                 'pct': (float(np.exp(effective_log)) - 1.0) * 100.0,
                 'source': cmp['best'],
                 'skill': cmp['skill'],
@@ -528,11 +567,20 @@ if st.button("🚀 Run All-Assets Analysis"):
     for idx, (asset_name, ticker) in enumerate(asset_map.items()):
         status_text.text(f"Processing ({idx + 1}/{total}): {asset_name}")
 
-        results, price = get_predictions(ticker, apply_shrinkage, n_folds)
+        results, close_price = get_predictions(ticker, apply_shrinkage, n_folds)
         sent_score, sent_status = sentiments.get(asset_name, (0.0, "n/a"))
 
         if results:
-            sub = {"Asset": asset_name, "Current": f"${price:,.4f}" if price < 1 else f"${price:,.2f}"}
+            live, live_src = get_live_price(ticker)
+            price = live if (use_live and live) else close_price
+            gap_pct = ((live / close_price - 1.0) * 100.0) if live else 0.0
+
+            fmt_p = "${:,.4f}" if price < 1 else "${:,.2f}"
+            sub = {"Asset": asset_name, "Anchor": fmt_p.format(price)}
+            if use_live:
+                sub["Staleness"] = (
+                    f"{gap_pct:+.2f}% ({live_src})" if live else "— stale close"
+                )
             diag = {"Asset": asset_name}
 
             for h in HORIZONS:
@@ -542,13 +590,17 @@ if st.button("🚀 Run All-Assets Analysis"):
                     continue
 
                 r = results[h]
-                final = r['price'] * (1 + sent_score * sentiment_weight)
+                # Re-anchor on the live price: the model contributes a log
+                # offset, the anchor supplies the level.
+                final = price * float(np.exp(r['log_offset']))
+                final *= (1 + sent_score * sentiment_weight)
                 pct = (final / price - 1.0) * 100.0
 
                 cell = f"${final:,.4f}" if final < 1 else f"${final:,.2f}"
                 cell += f"  ({pct:+.2f}%)"
                 if show_bands:
-                    lo, hi = r['lo'], r['hi']
+                    lo = final * float(np.exp(-BAND_Z * r['sigma']))
+                    hi = final * float(np.exp(BAND_Z * r['sigma']))
                     fmt = "{:,.4f}" if hi < 1 else "{:,.2f}"
                     cell += f"\n[{fmt.format(lo)} – {fmt.format(hi)}]"
                 sub[h] = cell
