@@ -4,15 +4,17 @@ import pandas as pd
 import numpy as np
 import xgboost as xgb
 from sklearn.metrics import mean_absolute_error, accuracy_score
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, VotingRegressor
 
 st.set_page_config(page_title="SafeBets Multi-Horizon AI", page_icon="📈", layout="wide")
 
+# --- 1. PASSCODE SECURITY ---
 password = st.text_input("Enter Password", type="password")
 if password != "admin123":
     st.warning("Please enter the password to access the dashboard.")
     st.stop()
 
-# --- EXPANDED ASSET MAP ---
+# --- 2. ASSET MAP ---
 asset_map = {
     # Crypto
     "Crypto - BTC": "BTC-USD", "Crypto - ETH": "ETH-USD", "Crypto - SOL": "SOL-USD", 
@@ -30,7 +32,8 @@ asset_map = {
     "Comm - GOLD": "GC=F", "Comm - SILVER": "SI=F", "Comm - WTI": "CL=F", "Comm - COPPER": "HG=F"
 }
 
-@st.cache_data(ttl=3600)  # Caches results for 1 hour to keep the dashboard fast
+# --- 3. ENSEMBLE PREDICTION ENGINE ---
+@st.cache_data(ttl=3600)  # Caches results for 1 hour to keep dashboard fast
 def get_exact_price_predictions(ticker_symbol):
     try:
         df = yf.Ticker(ticker_symbol).history(period="5y")
@@ -39,7 +42,7 @@ def get_exact_price_predictions(ticker_symbol):
             
         df = df[['Close', 'Volume']].copy()
         
-        # Feature Engineering
+        # Technical Indicator Feature Engineering
         df['Return'] = df['Close'].pct_change()
         df['SMA_10'] = df['Close'].rolling(window=10).mean()
         df['SMA_50'] = df['Close'].rolling(window=50).mean()
@@ -79,6 +82,7 @@ def get_exact_price_predictions(ticker_symbol):
         results = {}
         
         for name, days in horizons.items():
+            # Percentage return target over 'days'
             target_return = (historical_data['Close'].shift(-days) - historical_data['Close']) / historical_data['Close']
             
             valid_idx = historical_data.index[:-days]
@@ -89,13 +93,23 @@ def get_exact_price_predictions(ticker_symbol):
             X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
             y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
             
-            model = xgb.XGBRegressor(
-                objective='reg:squarederror', 
-                random_state=42, 
-                learning_rate=0.03, 
-                max_depth=4,
-                n_estimators=100
+            # --- 3-MODEL ENSEMBLE ---
+            xgb_model = xgb.XGBRegressor(
+                objective='reg:squarederror', random_state=42, learning_rate=0.03, max_depth=4, n_estimators=100
             )
+            rf_model = RandomForestRegressor(
+                n_estimators=100, random_state=42, max_depth=4
+            )
+            gb_model = GradientBoostingRegressor(
+                n_estimators=100, random_state=42, learning_rate=0.03, max_depth=4
+            )
+            
+            # Voting Ensemble averages predictions from all 3 models
+            model = VotingRegressor(estimators=[
+                ('xgb', xgb_model),
+                ('rf', rf_model),
+                ('gb', gb_model)
+            ])
             model.fit(X_train, y_train)
             
             test_preds = model.predict(X_test)
@@ -118,7 +132,7 @@ def get_exact_price_predictions(ticker_symbol):
     except Exception:
         return None, None, None
 
-# --- DASHBOARD NAVIGATION ---
+# --- 4. DASHBOARD INTERFACE ---
 st.title("📈 SafeBets Master Multi-Horizon Predictor")
 
 tab1, tab2 = st.tabs(["📊 Master Table (All Assets)", "🔍 Single Asset Detailed View"])
@@ -126,7 +140,7 @@ tab1, tab2 = st.tabs(["📊 Master Table (All Assets)", "🔍 Single Asset Detai
 # --- TAB 1: ALL ASSETS AT ONCE ---
 with tab1:
     st.subheader("Daily All-Assets Prediction Table")
-    st.markdown("Click below to train models and generate targets for all crypto, tech, chips, and commodities simultaneously.")
+    st.markdown("Click below to train ensemble models and generate targets for all assets simultaneously.")
     
     if st.button("🚀 Generate All Market Predictions"):
         master_rows = []
@@ -161,7 +175,7 @@ with tab2:
     ticker = asset_map[selected_asset]
 
     if st.button("Generate Detailed Prediction"):
-        with st.spinner(f"Running detailed analysis for {selected_asset}..."):
+        with st.spinner(f"Running ensemble analysis for {selected_asset}..."):
             results, price, df = get_exact_price_predictions(ticker)
             
             if results is None:
