@@ -4,3 +4,4 @@ pandas
 numpy
 xgboost
 scikit-learn
+google-generativeai
