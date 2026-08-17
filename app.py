@@ -10,7 +10,7 @@ from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, V
 
 st.set_page_config(page_title="SafeBets Master Multi-Horizon Predictor", page_icon="📈", layout="wide")
 
-# --- 1. SECURE CONFIGURATION & DYNAMIC MODEL DISCOVERY ---
+# --- 1. SECURE CONFIGURATION & ACTIVE HEALTH CHECK ---
 password = st.text_input("Enter Password", type="password")
 if password != "admin123":
     st.warning("Please enter the password to access the dashboard.")
@@ -18,36 +18,49 @@ if password != "admin123":
 
 ai_enabled = False
 gemini = None
+active_model_name = ""
 
-# Sidebar connection & dynamic model resolution
+# Sidebar connection & active verification
 if "GEMINI_API_KEY" in st.secrets and str(st.secrets["GEMINI_API_KEY"]).strip():
     try:
         genai.configure(api_key=str(st.secrets["GEMINI_API_KEY"]).strip())
         
-        # Query Google AI Studio for active generation models tied to your API key
-        selected_model = None
-        all_models = list(genai.list_models())
+        # Priority list of model names to test
+        candidate_models = [
+            'gemini-1.5-flash',
+            'gemini-2.0-flash',
+            'gemini-1.5-pro',
+            'gemini-2.5-flash',
+            'gemini-flash-latest',
+            'gemini-pro'
+        ]
         
-        # Priority 1: Find an active Flash model
-        for m in all_models:
-            if 'generateContent' in m.supported_generation_methods and 'flash' in m.name.lower():
-                selected_model = m.name
-                break
-                
-        # Priority 2: Fallback to any active text generation model
-        if not selected_model:
-            for m in all_models:
+        # Add dynamic models from list_models() as backup
+        try:
+            for m in genai.list_models():
                 if 'generateContent' in m.supported_generation_methods:
-                    selected_model = m.name
+                    clean_m = m.name.replace("models/", "")
+                    if clean_m not in candidate_models:
+                        candidate_models.append(clean_m)
+        except Exception:
+            pass
+
+        # Perform active health check with a 1-token test call
+        for m_name in candidate_models:
+            try:
+                test_model = genai.GenerativeModel(m_name)
+                res = test_model.generate_content("1")
+                if res and res.text:
+                    gemini = test_model
+                    active_model_name = m_name
+                    ai_enabled = True
+                    st.sidebar.success(f"✅ Gemini Connected ({m_name})")
                     break
-                    
-        if selected_model:
-            gemini = genai.GenerativeModel(selected_model)
-            ai_enabled = True
-            clean_name = selected_model.replace("models/", "")
-            st.sidebar.success(f"✅ Gemini API Connected ({clean_name})")
-        else:
-            st.sidebar.error("❌ No active generation models available for this key.")
+            except Exception:
+                continue
+
+        if not ai_enabled:
+            st.sidebar.error("❌ Gemini API key valid, but no model endpoint responded to generateContent.")
     except Exception as e:
         st.sidebar.error(f"❌ Gemini Init Error: {e}")
 else:
