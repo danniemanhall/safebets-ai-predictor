@@ -3,7 +3,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import xgboost as xgb
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import mean_absolute_error, accuracy_score
 
 st.set_page_config(page_title="SafeBets Multi-Horizon AI", page_icon="📈", layout="wide")
 
@@ -31,7 +31,7 @@ asset_map = {
 }
 
 @st.cache_data
-def get_multi_horizon_predictions(ticker_symbol):
+def get_exact_price_predictions(ticker_symbol):
     df = yf.Ticker(ticker_symbol).history(period="5y")
     if df.empty:
         return None, None, None
@@ -70,54 +70,69 @@ def get_multi_horizon_predictions(ticker_symbol):
         
     features = ['Return', 'SMA_10', 'SMA_50', 'RSI', 'BB_Position', 'MACD', 'MACD_Hist', 'Volume_Change']
     
-    # Isolate today's data to predict the future
+    latest_price = df['Close'].iloc[-1]
     X_today = df.iloc[[-1]][features]
     historical_data = df.iloc[:-1].copy()
     
-    # The different time horizons we want to predict
     horizons = {'1D': 1, '7D': 7, '14D': 14, '30D': 30}
     results = {}
     
     for name, days in horizons.items():
-        # Create target shifted by 'days'
-        target = (historical_data['Close'].shift(-days) > historical_data['Close']).astype(int)
+        # Target: Percentage price return over 'days'
+        target_return = (historical_data['Close'].shift(-days) - historical_data['Close']) / historical_data['Close']
         
-        # We must drop the last 'days' rows during training because the future hasn't happened yet
         valid_idx = historical_data.index[:-days]
         X = historical_data.loc[valid_idx, features]
-        y = target.loc[valid_idx]
+        y = target_return.loc[valid_idx]
         
         split_index = int(len(X) * 0.8)
         X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
         y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
         
-        # Train a brand new model just for this specific time horizon
-        model = xgb.XGBClassifier(eval_metric='logloss', random_state=42, learning_rate=0.05, max_depth=4)
+        # Train XGBoost Regression Model for exact price forecasting
+        model = xgb.XGBRegressor(
+            objective='reg:squarederror', 
+            random_state=42, 
+            learning_rate=0.03, 
+            max_depth=4,
+            n_estimators=100
+        )
         model.fit(X_train, y_train)
         
-        acc = accuracy_score(y_test, model.predict(X_test))
-        pred = model.predict(X_today)[0]
-        prob = model.predict_proba(X_today)[0]
+        # Backtest testing
+        test_preds = model.predict(X_test)
+        
+        # Calculate directional backtest accuracy
+        dir_accuracy = accuracy_score(y_test > 0, test_preds > 0)
+        
+        # Calculate average dollar error margin on testing set
+        avg_dollar_error = mean_absolute_error(y_test * latest_price, test_preds * latest_price)
+        
+        # Today's Prediction
+        pred_return = model.predict(X_today)[0]
+        predicted_price = latest_price * (1 + pred_return)
+        dollar_change = predicted_price - latest_price
         
         results[name] = {
-            'accuracy': acc,
-            'prediction': pred,
-            'confidence': prob[1] if pred == 1 else prob[0]
+            'predicted_price': predicted_price,
+            'dollar_change': dollar_change,
+            'percent_change': pred_return * 100,
+            'dir_accuracy': dir_accuracy,
+            'avg_dollar_error': avg_dollar_error
         }
         
-    latest_price = df['Close'].iloc[-1]
     return results, latest_price, df
 
 # --- DASHBOARD UI ---
-st.title("📈 SafeBets Multi-Horizon Predictor")
-st.markdown("Select an asset below to generate independent AI predictions for 1, 7, 14, and 30 days out.")
+st.title("📈 SafeBets Multi-Horizon Price Predictor")
+st.markdown("Generates **exact price targets** rounded to the nearest cent for 1, 7, 14, and 30 days out.")
 
 selected_asset = st.selectbox("Select Asset", list(asset_map.keys()))
 ticker = asset_map[selected_asset]
 
-if st.button("Generate Predictions"):
-    with st.spinner(f"Training 4 AI models for {selected_asset}..."):
-        results, price, df = get_multi_horizon_predictions(ticker)
+if st.button("Generate Exact Price Predictions"):
+    with st.spinner(f"Running regression algorithms for {selected_asset}..."):
+        results, price, df = get_exact_price_predictions(ticker)
         
         if results is None:
             st.error("Not enough historical data to generate predictions for this asset.")
@@ -126,7 +141,7 @@ if st.button("Generate Predictions"):
         st.divider()
         st.metric("Current Price", f"${price:,.2f}")
         
-        # Display the 4 time horizons side-by-side
+        # Display 4 time horizons side-by-side
         cols = st.columns(4)
         horizons = ['1D', '7D', '14D', '30D']
         
@@ -134,14 +149,22 @@ if st.button("Generate Predictions"):
             horizon = horizons[i]
             data = results[horizon]
             
-            direction = "⬆️ UP" if data['prediction'] == 1 else "⬇️ DOWN"
+            target_p = data['predicted_price']
+            d_change = data['dollar_change']
+            p_change = data['percent_change']
             
             with col:
                 st.subheader(f"{horizon} Forecast")
-                st.metric("Trend", direction)
-                st.metric("Confidence", f"{data['confidence'] * 100:.1f}%")
-                st.caption(f"Backtest Acc: {data['accuracy'] * 100:.1f}%")
+                # Main exact dollar figure rounded to nearest cent
+                st.metric(
+                    label="Target Price", 
+                    value=f"${target_p:,.2f}", 
+                    delta=f"{d_change:+.2f} ({p_change:+.2f}%)"
+                )
+                
+                st.caption(f"Directional Acc: {data['dir_accuracy'] * 100:.1f}%")
+                st.caption(f"Avg Margin of Error: ±${data['avg_dollar_error']:,.2f}")
         
         st.divider()
-        st.subheader(f"90-Day Price Trend ({selected_asset})")
+        st.subheader(f"90-Day Price History ({selected_asset})")
         st.line_chart(df['Close'].tail(90))
