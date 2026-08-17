@@ -1,3 +1,22 @@
+"""
+SafeBets Multi-Horizon Predictor.
+
+Built for a specific scoring rule: an exact price guess, scored on percentage
+error. That rule dictates the whole design.
+
+  * Percentage error on a price is, to first order, absolute error on its log.
+    So the target is the log return and every metric lives in log space.
+  * Absolute-error loss is minimised by the conditional MEDIAN, not the mean.
+    Every learner here is a median/MAE learner, and members are combined by
+    median rather than mean. Optimising squared error would target the mean,
+    which sits above the median by roughly sigma^2/2 -- about 3% on a 30-day
+    crypto horizon -- and would bias every submission upward.
+  * "Just enter today's price" is the baseline to beat. Skill is measured
+    against exactly that, and predictions are shrunk toward it in proportion
+    to measured skill, because under MAE a forecast you cannot justify costs
+    you points.
+"""
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -5,27 +24,29 @@ import numpy as np
 import xgboost as xgb
 import json
 import re
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import QuantileRegressor
+from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.preprocessing import StandardScaler
 
-st.set_page_config(page_title="SafeBets Master Multi-Horizon Predictor", page_icon="📈", layout="wide")
+st.set_page_config(page_title="SafeBets Multi-Horizon Predictor", page_icon="📈", layout="wide")
 
-# --- 1. SECURE CONFIGURATION (NO STARTUP API CALLS) ---
+# --- 1. CONFIGURATION ---
 password = st.text_input("Enter Password", type="password")
 if password != st.secrets.get("APP_PASSWORD", "admin123"):
     st.warning("Please enter the password to access the dashboard.")
     st.stop()
 
 SENTIMENT_MODEL = "claude-haiku-4-5-20251001"
-GEMINI_FALLBACK_MODEL = "gemini-2.0-flash"
+GEMINI_FALLBACK_MODEL = "gemini-3.1-flash-lite"
 MAX_HEADLINES = 4
 
 HISTORY_PERIOD = "5y"
-N_FOLDS = 3
-HALFLIFE_DAYS = 252          # recent data weighted more heavily
-BAND_Z = 1.28                # ~80% prediction interval
-MAX_SIGMA_CLIP = 3.0         # clip predicted return to +/- 3 horizon-sigmas
+DEFAULT_FOLDS = 3
+HALFLIFE_DAYS = 252
+BAND_Z = 1.28
+MAX_SIGMA_CLIP = 2.0   # tighter than before: under MAE, bold calls are punished
+
+HORIZONS = {'1D': 1, '7D': 7, '14D': 14, '30D': 30}
 
 ANTHROPIC_KEY = str(st.secrets.get("ANTHROPIC_API_KEY", "")).strip()
 GEMINI_KEY = str(st.secrets.get("GEMINI_API_KEY", "")).strip()
@@ -39,40 +60,30 @@ else:
 
 st.sidebar.markdown("---")
 apply_shrinkage = st.sidebar.checkbox(
-    "Shrink targets by measured skill", value=True,
-    help="Scales each prediction by its out-of-sample skill score. When a model "
-         "has no measured edge, its target collapses to the current price."
+    "Shrink toward today's price by measured skill", value=True,
+    help="Under percentage-error scoring this is almost always correct. A model "
+         "with no measured edge should submit today's price."
 )
-show_bands = st.sidebar.checkbox("Show prediction ranges", value=True)
 n_folds = st.sidebar.slider(
-    "Validation folds", 0, 4, N_FOLDS, 1,
-    help="Walk-forward folds used to measure skill. 0 skips validation entirely "
-         "(much faster, but then there is no skill estimate and no shrinkage). "
-         "A full 26-asset sweep takes roughly 2 minutes per fold."
+    "Validation folds", 1, 4, DEFAULT_FOLDS, 1,
+    help="Walk-forward folds used to measure skill against the 'enter today's "
+         "price' baseline. Roughly 1.5 minutes per fold for a full sweep."
 )
 sentiment_weight = st.sidebar.slider(
-    "Sentiment weight", 0.0, 0.05, 0.015, 0.005,
-    help="Max fractional nudge applied to a target at sentiment = +/-1.0."
+    "Sentiment weight", 0.0, 0.03, 0.0, 0.0025,
+    help="Defaults to 0. A sentiment nudge only helps if it beats the baseline, "
+         "and that has not been validated. Raise it only after backtesting."
 )
-
-if n_folds == 0 and apply_shrinkage:
-    st.sidebar.info("Shrinkage needs at least 1 validation fold — it is inactive.")
+show_bands = st.sidebar.checkbox("Show 80% ranges", value=True)
 
 # --- 2. ASSET MAP ---
 asset_map = {
-    # Crypto
     "Crypto - BTC": "BTC-USD", "Crypto - ETH": "ETH-USD", "Crypto - SOL": "SOL-USD",
-    "Crypto - DOGE": "DOGE-USD", "Crypto - AVAX": "AVAX-USD", "Crypto - LINK": "LINK-USD", "Crypto - HYPE": "HYPE-USD",
-
-    # Big Tech
+    "Crypto - DOGE": "DOGE-USD", "Crypto - AVAX": "AVAX-USD", "Crypto - LINK": "LINK-USD",
     "Tech - NVDA": "NVDA", "Tech - TSLA": "TSLA", "Tech - AAPL": "AAPL", "Tech - MSFT": "MSFT",
-    "Tech - AMZN": "AMZN", "Tech - META": "META", "Tech - GOOGL": "GOOGL", "Tech - NFLX": "NFLX", "Tech - SPCX": "SPCX",
-
-    # AI Chips
-    "Chips - AMD": "AMD", "Chips - MU": "MU", "Chips - SNDK": "SNDK", "Chips - AVGO": "AVGO",
+    "Tech - AMZN": "AMZN", "Tech - META": "META", "Tech - GOOGL": "GOOGL", "Tech - NFLX": "NFLX",
+    "Chips - AMD": "AMD", "Chips - MU": "MU", "Chips - AVGO": "AVGO",
     "Chips - INTC": "INTC", "Chips - ARM": "ARM",
-
-    # Commodities
     "Comm - GOLD": "GC=F", "Comm - SILVER": "SI=F", "Comm - WTI": "CL=F", "Comm - COPPER": "HG=F"
 }
 
@@ -80,7 +91,6 @@ asset_map = {
 
 
 def _fetch_headlines(ticker_symbol, limit=MAX_HEADLINES):
-    """Pull up to `limit` headline strings, tolerating both yfinance news schemas."""
     try:
         news = yf.Ticker(ticker_symbol).news or []
     except Exception:
@@ -100,7 +110,6 @@ def _fetch_headlines(ticker_symbol, limit=MAX_HEADLINES):
 
 
 def _parse_json_scores(text):
-    """Parse the model's JSON reply, tolerating code fences and stray prose."""
     cleaned = text.strip()
     cleaned = re.sub(r"^```(?:json)?", "", cleaned).strip()
     cleaned = re.sub(r"```$", "", cleaned).strip()
@@ -122,7 +131,6 @@ def _parse_json_scores(text):
 
 
 def _call_llm(prompt):
-    """Return (text, status). Claude primary, Gemini fallback."""
     last_error = "No provider configured"
 
     if ANTHROPIC_KEY:
@@ -161,10 +169,6 @@ def _call_llm(prompt):
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_all_sentiments(asset_items):
-    """
-    asset_items: tuple of (asset_name, ticker_symbol) pairs.
-    Returns {asset_name: (score, status)} using exactly ONE model call.
-    """
     results = {name: (0.0, "No news found") for name, _ in asset_items}
 
     headline_map = {}
@@ -230,12 +234,9 @@ FEATURES = [
 
 def build_features(df):
     """
-    Turn an OHLCV frame into scale-free (stationary) features.
-
-    Every feature is a ratio, a bounded oscillator or a return. None of them
-    carry the price level, so a model trained at $30k BTC stays valid at $90k.
-    Raw SMA levels were the single biggest defect in the original version:
-    tree models cannot extrapolate beyond their training range, so any asset
+    Scale-free features only. Nothing carries the price level, so a model
+    trained at $30k BTC stays valid at $90k. Raw SMA levels were the original
+    defect: trees cannot extrapolate past their training range, so any asset
     trading above its historical band had its prediction silently clamped.
     """
     out = df[['Close', 'Volume']].copy()
@@ -272,8 +273,9 @@ def build_features(df):
     out['macd_rel'] = macd / close
     out['macd_hist_rel'] = (macd - macd_signal) / close
 
-    out['vol_21'] = out['ret_1'].rolling(21).std()
-    vol_63 = out['ret_1'].rolling(63).std()
+    out['log_ret'] = np.log(close).diff()
+    out['vol_21'] = out['log_ret'].rolling(21).std()
+    vol_63 = out['log_ret'].rolling(63).std()
     out['vol_ratio'] = out['vol_21'] / (vol_63 + 1e-9)
 
     vol_mean_20 = out['Volume'].rolling(20).mean()
@@ -281,142 +283,139 @@ def build_features(df):
 
     out['dist_52w_high'] = close / close.rolling(252, min_periods=60).max() - 1.0
 
-    out = out.replace([np.inf, -np.inf], np.nan)
-    return out
+    return out.replace([np.inf, -np.inf], np.nan)
 
 
 def _sample_weights(n, halflife=HALFLIFE_DAYS):
-    """Exponential recency weights: the newest row weighs 1.0, older rows decay."""
     age = np.arange(n - 1, -1, -1, dtype=float)
     return 0.5 ** (age / halflife)
 
 
-def _fit_ensemble(X_train, y_train, weights):
+def fit_median_ensemble(X_train, y_train, weights):
     """
-    Fit four models spanning different inductive biases and return a predictor.
+    Three MAE/median learners with different inductive biases, combined by
+    median. Every one of them targets the conditional median of the log
+    return, which is the quantity that minimises percentage error.
+    """
+    members = []
 
-    Ridge is included deliberately: financial return data has a very low
-    signal-to-noise ratio, where a regularised linear model is usually more
-    robust than boosted trees, and unlike trees it can extrapolate.
-    """
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_train)
+    try:
+        qr = QuantileRegressor(quantile=0.5, alpha=0.01, solver='highs')
+        qr.fit(X_scaled, y_train, sample_weight=weights)
+        members.append(lambda Xn, _qr=qr, _s=scaler: _qr.predict(_s.transform(Xn)))
+    except Exception:
+        pass
 
-    ridge = Ridge(alpha=10.0)
-    ridge.fit(X_scaled, y_train, sample_weight=weights)
+    try:
+        xgb_model = xgb.XGBRegressor(
+            objective='reg:absoluteerror', random_state=42, learning_rate=0.03,
+            max_depth=3, n_estimators=150, subsample=0.8, colsample_bytree=0.8,
+            reg_lambda=2.0, n_jobs=1
+        )
+        xgb_model.fit(X_train, y_train, sample_weight=weights)
+        members.append(lambda Xn, _m=xgb_model: _m.predict(Xn))
+    except Exception:
+        pass
 
-    xgb_model = xgb.XGBRegressor(
-        objective='reg:squarederror', random_state=42, learning_rate=0.03,
-        max_depth=3, n_estimators=120, subsample=0.8, colsample_bytree=0.8,
-        reg_lambda=2.0, n_jobs=1
-    )
-    xgb_model.fit(X_train, y_train, sample_weight=weights)
+    try:
+        hgb = HistGradientBoostingRegressor(
+            loss='absolute_error', max_iter=150, learning_rate=0.03,
+            max_depth=3, min_samples_leaf=25, l2_regularization=1.0,
+            random_state=42
+        )
+        hgb.fit(X_train, y_train, sample_weight=weights)
+        members.append(lambda Xn, _m=hgb: _m.predict(Xn))
+    except Exception:
+        pass
 
-    rf_model = RandomForestRegressor(
-        n_estimators=120, random_state=42, max_depth=4,
-        min_samples_leaf=20, n_jobs=-1
-    )
-    rf_model.fit(X_train, y_train, sample_weight=weights)
-
-    gb_model = GradientBoostingRegressor(
-        n_estimators=120, random_state=42, learning_rate=0.03,
-        max_depth=3, subsample=0.8, min_samples_leaf=20
-    )
-    gb_model.fit(X_train, y_train, sample_weight=weights)
+    if not members:
+        return lambda Xn: np.zeros(len(Xn))
 
     def predict(X_new):
-        preds = np.column_stack([
-            ridge.predict(scaler.transform(X_new)),
-            xgb_model.predict(X_new),
-            rf_model.predict(X_new),
-            gb_model.predict(X_new),
-        ])
-        return preds.mean(axis=1)
+        stacked = np.column_stack([m(X_new) for m in members])
+        return np.median(stacked, axis=1)   # median combine, matching the loss
 
     return predict
 
 
-def walk_forward_skill(X, y, days, n_folds=N_FOLDS):
+def walk_forward_mae(X, y, days, n_folds):
     """
-    Measure genuine out-of-sample performance with a purge gap.
+    Out-of-sample MAE against the only baseline that matters here: submitting
+    today's price, i.e. predicting a log return of zero.
 
-    The label at row t is built from prices at t+days, so any test row within
-    `days` of the training cut is contaminated by data the model already saw.
-    Purging that gap is what separates a real accuracy estimate from a
-    flattering one.
+    The label at row t is built from prices at t+days, so a test row within
+    `days` of the training cut is contaminated. That gap is purged.
 
-    Returns (skill, directional_accuracy, n_tested) where skill is
-    1 - MSE(model)/MSE(always predict zero). Positive means the model beats a
-    random walk; zero or negative means it does not.
+    Returns (skill, mae_model, mae_baseline, n_tested) where
+    skill = 1 - MAE(model)/MAE(baseline). Positive means the model beat
+    "enter today's price"; zero or below means it did not.
     """
     n = len(X)
     if n_folds < 1 or n < 250:
-        return 0.0, 0.5, 0
+        return 0.0, np.nan, np.nan, 0
 
     fold_size = n // (n_folds + 1)
     if fold_size <= days + 30:
-        return 0.0, 0.5, 0
+        return 0.0, np.nan, np.nan, 0
 
-    all_preds, all_actual = [], []
+    preds, actuals = [], []
 
     for k in range(1, n_folds + 1):
         train_end = fold_size * k
-        test_start = train_end + days          # purge gap
+        test_start = train_end + days
         test_end = min(test_start + fold_size, n)
 
         if train_end < 120 or test_end - test_start < 20:
             continue
 
-        X_tr = X.iloc[:train_end]
-        y_tr = y.iloc[:train_end]
-        X_te = X.iloc[test_start:test_end]
-        y_te = y.iloc[test_start:test_end]
-
         try:
-            predictor = _fit_ensemble(X_tr, y_tr, _sample_weights(len(X_tr)))
-            all_preds.append(predictor(X_te))
-            all_actual.append(y_te.to_numpy())
+            predictor = fit_median_ensemble(
+                X.iloc[:train_end], y.iloc[:train_end], _sample_weights(train_end)
+            )
+            preds.append(predictor(X.iloc[test_start:test_end]))
+            actuals.append(y.iloc[test_start:test_end].to_numpy())
         except Exception:
             continue
 
-    if not all_preds:
-        return 0.0, 0.5, 0
+    if not preds:
+        return 0.0, np.nan, np.nan, 0
 
-    preds = np.concatenate(all_preds)
-    actual = np.concatenate(all_actual)
+    p = np.concatenate(preds)
+    a = np.concatenate(actuals)
 
-    mse_model = float(np.mean((preds - actual) ** 2))
-    mse_baseline = float(np.mean(actual ** 2))       # baseline: predict no change
-    skill = 0.0 if mse_baseline <= 0 else 1.0 - (mse_model / mse_baseline)
+    mae_model = float(np.mean(np.abs(p - a)))
+    mae_base = float(np.mean(np.abs(a)))       # baseline: predict zero log return
+    skill = 0.0 if mae_base <= 0 else 1.0 - (mae_model / mae_base)
 
-    moved = np.abs(actual) > 1e-9
-    dir_acc = float(np.mean(np.sign(preds[moved]) == np.sign(actual[moved]))) if moved.any() else 0.5
-
-    return float(skill), dir_acc, int(len(preds))
+    return float(skill), mae_model, mae_base, int(len(p))
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def get_exact_price_predictions(ticker_symbol, shrink_enabled=True, folds=N_FOLDS):
+def get_predictions(ticker_symbol, shrink_enabled=True, folds=DEFAULT_FOLDS):
     try:
         raw = yf.Ticker(ticker_symbol).history(period=HISTORY_PERIOD)
         if raw.empty or len(raw) < 300:
-            return None, None, None
+            return None, None
 
         df = build_features(raw).dropna()
         if len(df) < 300:
-            return None, None, None
+            return None, None
 
         latest_price = float(df['Close'].iloc[-1])
         X_today = df.iloc[[-1]][FEATURES]
         history = df.iloc[:-1].copy()
+        log_close = np.log(history['Close'])
 
-        daily_sigma = float(history['ret_1'].tail(126).std())
+        daily_sigma = float(history['log_ret'].tail(126).std())
 
-        horizons = {'1D': 1, '7D': 7, '14D': 14, '30D': 30}
         results = {}
 
-        for name, days in horizons.items():
-            target = history['Close'].shift(-days) / history['Close'] - 1.0
+        for name, days in HORIZONS.items():
+            # Target is the log return over the horizon: percentage error on a
+            # price is absolute error on its log, to first order.
+            target = log_close.shift(-days) - log_close
 
             usable = history.index[:-days]
             X = history.loc[usable, FEATURES]
@@ -427,134 +426,118 @@ def get_exact_price_predictions(ticker_symbol, shrink_enabled=True, folds=N_FOLD
             if len(X) < 250:
                 continue
 
-            skill, dir_acc, n_tested = walk_forward_skill(X, y, days, folds)
+            skill, mae_model, mae_base, n_tested = walk_forward_mae(X, y, days, folds)
 
-            # Final model trains on ALL available history, not a stale 80%.
-            predictor = _fit_ensemble(X, y, _sample_weights(len(X)))
-            pred_return = float(predictor(X_today)[0])
+            predictor = fit_median_ensemble(X, y, _sample_weights(len(X)))
+            pred_log = float(predictor(X_today)[0])
 
-            # Keep the point estimate inside the asset's own realised range.
             horizon_sigma = daily_sigma * np.sqrt(days)
             cap = MAX_SIGMA_CLIP * horizon_sigma
-            pred_return = float(np.clip(pred_return, -cap, cap))
+            pred_log = float(np.clip(pred_log, -cap, cap))
 
-            # With no validation folds there is no measurement, so there is no
-            # basis to shrink. Zeroing everything there would be a false signal,
-            # not a conservative one.
-            if shrink_enabled and folds >= 1:
-                shrink = float(np.clip(skill, 0.0, 1.0))
-            else:
-                shrink = 1.0
-            effective_return = pred_return * shrink
+            shrink = float(np.clip(skill, 0.0, 1.0)) if shrink_enabled else 1.0
+            effective_log = pred_log * shrink
 
             results[name] = {
-                'predicted_price': latest_price * (1 + effective_return),
-                'raw_return': pred_return,
-                'effective_return': effective_return,
-                'percent_change': effective_return * 100,
+                'price': latest_price * float(np.exp(effective_log)),
+                'pct': (float(np.exp(effective_log)) - 1.0) * 100.0,
+                'raw_log': pred_log,
                 'skill': skill,
-                'dir_acc': dir_acc,
+                'mae_model_pct': mae_model * 100 if np.isfinite(mae_model) else np.nan,
+                'mae_base_pct': mae_base * 100 if np.isfinite(mae_base) else np.nan,
                 'n_tested': n_tested,
-                'sigma': horizon_sigma,
+                'lo': latest_price * float(np.exp(effective_log - BAND_Z * horizon_sigma)),
+                'hi': latest_price * float(np.exp(effective_log + BAND_Z * horizon_sigma)),
             }
 
         if not results:
-            return None, None, None
+            return None, None
 
-        return results, latest_price, df
+        return results, latest_price
     except Exception:
-        return None, None, None
+        return None, None
 
 
-# --- 5. DASHBOARD INTERFACE ---
-st.title("📈 SafeBets Master Prediction Table")
-st.markdown("Generates **Math Ensemble Price Targets** adjusted by **AI News Sentiment**.")
+# --- 5. DASHBOARD ---
+st.title("📈 SafeBets Multi-Horizon Predictor")
+st.caption(
+    "Optimised for percentage-error scoring: every target is a conditional "
+    "median log return, and skill is measured against submitting today's price."
+)
 
-col_btn1, col_btn2 = st.columns([1, 4])
-with col_btn1:
-    if st.button("🧹 Clear Cache"):
-        st.cache_data.clear()
-        st.success("Cache cleared!")
+if st.button("🧹 Clear Cache"):
+    st.cache_data.clear()
+    st.success("Cache cleared!")
 
 if st.button("🚀 Run All-Assets Analysis"):
-    master_rows = []
+    submission_rows, diagnostic_rows = [], []
     progress_bar = st.progress(0)
     status_text = st.empty()
-    total_assets = len(asset_map)
+    total = len(asset_map)
 
-    status_text.text("Scoring news sentiment for all assets (single API call)...")
-    sentiments = get_all_sentiments(tuple(asset_map.items()))
+    if sentiment_weight > 0:
+        status_text.text("Scoring news sentiment (single API call)...")
+        sentiments = get_all_sentiments(tuple(asset_map.items()))
+    else:
+        sentiments = {name: (0.0, "disabled") for name in asset_map}
 
     for idx, (asset_name, ticker) in enumerate(asset_map.items()):
-        status_text.text(f"Processing ({idx + 1}/{total_assets}): {asset_name}")
+        status_text.text(f"Processing ({idx + 1}/{total}): {asset_name}")
 
-        results, price, _ = get_exact_price_predictions(ticker, apply_shrinkage, n_folds)
-        sentiment_score, sentiment_status = sentiments.get(asset_name, (0.0, "n/a"))
+        results, price = get_predictions(ticker, apply_shrinkage, n_folds)
+        sent_score, sent_status = sentiments.get(asset_name, (0.0, "n/a"))
 
-        if results is not None:
-            if sentiment_status == "OK":
-                sentiment_text = (
-                    f"🟢 +{sentiment_score:.2f}" if sentiment_score > 0.1
-                    else f"🔴 {sentiment_score:.2f}" if sentiment_score < -0.1
-                    else f"⚪ {sentiment_score:.2f}"
-                )
-            else:
-                sentiment_text = f"⚠️ 0.00 ({sentiment_status})"
+        if results:
+            sub = {"Asset": asset_name, "Current": f"${price:,.4f}" if price < 1 else f"${price:,.2f}"}
+            diag = {"Asset": asset_name}
 
-            row = {
-                "Asset": asset_name,
-                "Current Price": f"${price:,.2f}",
-                "News Sentiment": sentiment_text,
-            }
-
-            skills = []
-            for h in ['1D', '7D', '14D', '30D']:
+            for h in HORIZONS:
                 if h not in results:
-                    row[f"{h} Target"] = "n/a"
+                    sub[h] = "n/a"
+                    diag[f"{h} skill"] = "n/a"
                     continue
 
                 r = results[h]
-                skills.append(r['skill'])
+                final = r['price'] * (1 + sent_score * sentiment_weight)
+                pct = (final / price - 1.0) * 100.0
 
-                adjusted = r['predicted_price'] * (1 + sentiment_score * sentiment_weight)
-                adjusted_pct = ((adjusted - price) / price) * 100
-
-                cell = f"${adjusted:,.2f} ({adjusted_pct:+.2f}%)"
+                cell = f"${final:,.4f}" if final < 1 else f"${final:,.2f}"
+                cell += f"  ({pct:+.2f}%)"
                 if show_bands:
-                    band = BAND_Z * r['sigma'] * price
-                    cell += f"  ±${band:,.2f}"
-                row[f"{h} Target"] = cell
+                    lo, hi = r['lo'], r['hi']
+                    fmt = "{:,.4f}" if hi < 1 else "{:,.2f}"
+                    cell += f"\n[{fmt.format(lo)} – {fmt.format(hi)}]"
+                sub[h] = cell
 
-            best_skill = max(skills) if skills else 0.0
-            dir_acc_30 = results.get('30D', {}).get('dir_acc', 0.5)
+                mark = "🟢" if r['skill'] > 0.005 else ("⚪" if r['skill'] > -0.02 else "🔴")
+                diag[f"{h} skill"] = f"{mark} {r['skill']:+.3f}"
+                diag[f"{h} err"] = (
+                    f"{r['mae_model_pct']:.2f}% vs {r['mae_base_pct']:.2f}%"
+                    if np.isfinite(r['mae_model_pct']) else "n/a"
+                )
 
-            if best_skill > 0.01:
-                row["Model Skill"] = f"🟢 {best_skill:+.3f}"
-            elif best_skill > -0.05:
-                row["Model Skill"] = f"⚪ {best_skill:+.3f}"
-            else:
-                row["Model Skill"] = f"🔴 {best_skill:+.3f}"
+            submission_rows.append(sub)
+            diagnostic_rows.append(diag)
 
-            row["30D Dir. Acc"] = f"{dir_acc_30:.0%}"
-            master_rows.append(row)
-
-        progress_bar.progress((idx + 1) / total_assets)
+        progress_bar.progress((idx + 1) / total)
 
     status_text.text("Analysis complete!")
-    st.success("Master Market Sweep Complete!")
 
-    if master_rows:
-        summary_df = pd.DataFrame(master_rows)
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    if submission_rows:
+        st.subheader("Values to submit")
+        st.dataframe(pd.DataFrame(submission_rows), use_container_width=True, hide_index=True)
 
-        st.markdown("---")
+        st.subheader("Did the model beat 'just enter today's price'?")
+        st.dataframe(pd.DataFrame(diagnostic_rows), use_container_width=True, hide_index=True)
+
         st.markdown(
-            "**Reading the table.** *Model Skill* is an out-of-sample score: "
-            "`1 - MSE(model) / MSE(assume no change)`, measured on data the model "
-            "never trained on, with a purge gap so the label window cannot leak. "
-            "Above 0 means it beat a random walk on that asset. At or below 0 means "
-            "it did not, and with shrinkage enabled its target collapses toward the "
-            "current price. *Dir. Acc* is how often the 30-day direction was right — "
-            "50% is a coin flip. The ± figure is an 80% range from realised "
-            "volatility, and it will usually dwarf the predicted move."
+            "**Skill** is `1 - MAE(model) / MAE(enter today's price)`, measured "
+            "out-of-sample with a purge gap. **Err** shows the model's mean "
+            "absolute percentage error next to the baseline's. Green means the "
+            "model genuinely beat the baseline on that asset and horizon; grey "
+            "or red means it did not, and with shrinkage on, that target has "
+            "collapsed to today's price — which under percentage-error scoring "
+            "is the correct submission, not a failure. Expect most cells to be "
+            "grey. The 1D column is the hardest to beat and the 30D column the "
+            "easiest, because the baseline's own error grows with the horizon."
         )
