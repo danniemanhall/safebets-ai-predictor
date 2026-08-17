@@ -10,23 +10,27 @@ from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, V
 
 st.set_page_config(page_title="SafeBets Master Multi-Horizon Predictor", page_icon="📈", layout="wide")
 
-# --- 1. SECURE CONFIGURATION ---
+# --- 1. SECURE CONFIGURATION & DIAGNOSTICS ---
 password = st.text_input("Enter Password", type="password")
 if password != "admin123":
     st.warning("Please enter the password to access the dashboard.")
     st.stop()
 
-# Initialize Gemini AI
 ai_enabled = False
-try:
-    if "GEMINI_API_KEY" in st.secrets:
-        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+gemini_error = ""
+
+# Sidebar connection status check
+if "GEMINI_API_KEY" in st.secrets and str(st.secrets["GEMINI_API_KEY"]).strip():
+    try:
+        genai.configure(api_key=str(st.secrets["GEMINI_API_KEY"]).strip())
         gemini = genai.GenerativeModel('gemini-1.5-flash')
         ai_enabled = True
-    else:
-        st.sidebar.warning("GEMINI_API_KEY not found in Streamlit Secrets.")
-except Exception as e:
-    st.sidebar.error(f"Gemini Init Error: {e}")
+        st.sidebar.success("✅ Gemini API Connected")
+    except Exception as e:
+        gemini_error = str(e)
+        st.sidebar.error(f"❌ Gemini Init Error: {e}")
+else:
+    st.sidebar.error("❌ GEMINI_API_KEY missing in Secrets")
 
 # --- 2. ASSET MAP ---
 asset_map = {
@@ -46,27 +50,31 @@ asset_map = {
     "Comm - GOLD": "GC=F", "Comm - SILVER": "SI=F", "Comm - WTI": "CL=F", "Comm - COPPER": "HG=F"
 }
 
-# --- 3. ROBUST SENTIMENT ENGINE ---
+# --- 3. DIAGNOSTIC SENTIMENT ENGINE ---
 def get_news_sentiment(ticker_symbol, asset_name):
     if not ai_enabled:
-        return 0.0
+        return 0.0, "API key missing/failed"
     
     try:
         ticker = yf.Ticker(ticker_symbol)
         news = ticker.news
         if not news:
-            return 0.0
+            return 0.0, "No yfinance news"
             
         headlines = []
         for item in news[:4]:
             if isinstance(item, dict):
-                # Handles both legacy and updated yfinance dict formats
-                title = item.get('title') or item.get('content', {}).get('title')
+                # Handles all yfinance news output variations
+                title = (
+                    item.get('title') 
+                    or item.get('content', {}).get('title') 
+                    or item.get('headline')
+                )
                 if title:
                     headlines.append(title)
         
         if not headlines:
-            return 0.0
+            return 0.0, "No headline titles"
             
         prompt = f"""
         Analyze these financial news headlines for {asset_name}:
@@ -77,14 +85,15 @@ def get_news_sentiment(ticker_symbol, asset_name):
         """
         
         response = gemini.generate_content(prompt)
-        # Extract numeric float using regex
-        match = re.search(r"[-+]?\d*\.\d+|\d+", response.text)
+        text = response.text.strip() if response and response.text else ""
+        
+        match = re.search(r"[-+]?\d*\.\d+|\d+", text)
         if match:
             score = float(match.group())
-            return max(-1.0, min(1.0, score))
-        return 0.0
-    except Exception:
-        return 0.0
+            return max(-1.0, min(1.0, score)), "OK"
+        return 0.0, f"Parse error ({text[:15]})"
+    except Exception as e:
+        return 0.0, f"API Error: {str(e)[:25]}"
 
 # --- 4. OPTIMIZED QUANT ENGINE ---
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -180,10 +189,13 @@ if st.button("🚀 Run All-Assets Analysis"):
         status_text.text(f"Processing ({idx + 1}/{total_assets}): {asset_name}")
         
         results, price, _ = get_exact_price_predictions(ticker)
-        sentiment_score = get_news_sentiment(ticker, asset_name)
+        sentiment_score, sentiment_status = get_news_sentiment(ticker, asset_name)
         
         if results is not None:
-            sentiment_text = f"🟢 +{sentiment_score:.2f}" if sentiment_score > 0.1 else f"🔴 {sentiment_score:.2f}" if sentiment_score < -0.1 else f"⚪ {sentiment_score:.2f}"
+            if sentiment_status == "OK":
+                sentiment_text = f"🟢 +{sentiment_score:.2f}" if sentiment_score > 0.1 else f"🔴 {sentiment_score:.2f}" if sentiment_score < -0.1 else f"⚪ {sentiment_score:.2f}"
+            else:
+                sentiment_text = f"⚠️ 0.00 ({sentiment_status})"
             
             sentiment_weight = 0.015 
             adjusted_targets = {}
