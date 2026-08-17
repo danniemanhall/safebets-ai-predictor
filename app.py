@@ -10,7 +10,7 @@ from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, V
 
 st.set_page_config(page_title="SafeBets Master Multi-Horizon Predictor", page_icon="📈", layout="wide")
 
-# --- 1. SECURE CONFIGURATION & ACTIVE HEALTH CHECK ---
+# --- 1. SECURE CONFIGURATION & HEALTH CHECK ---
 password = st.text_input("Enter Password", type="password")
 if password != "admin123":
     st.warning("Please enter the password to access the dashboard.")
@@ -18,49 +18,28 @@ if password != "admin123":
 
 ai_enabled = False
 gemini = None
-active_model_name = ""
 
-# Sidebar connection & active verification
 if "GEMINI_API_KEY" in st.secrets and str(st.secrets["GEMINI_API_KEY"]).strip():
     try:
         genai.configure(api_key=str(st.secrets["GEMINI_API_KEY"]).strip())
         
-        # Priority list of model names to test
-        candidate_models = [
-            'gemini-1.5-flash',
-            'gemini-2.0-flash',
-            'gemini-1.5-pro',
-            'gemini-2.5-flash',
-            'gemini-flash-latest',
-            'gemini-pro'
-        ]
-        
-        # Add dynamic models from list_models() as backup
-        try:
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    clean_m = m.name.replace("models/", "")
-                    if clean_m not in candidate_models:
-                        candidate_models.append(clean_m)
-        except Exception:
-            pass
-
-        # Perform active health check with a 1-token test call
+        # Test candidate models with fallback
+        candidate_models = ['gemini-flash-latest', 'gemini-1.5-flash', 'gemini-2.0-flash']
         for m_name in candidate_models:
             try:
                 test_model = genai.GenerativeModel(m_name)
                 res = test_model.generate_content("1")
                 if res and res.text:
                     gemini = test_model
-                    active_model_name = m_name
                     ai_enabled = True
                     st.sidebar.success(f"✅ Gemini Connected ({m_name})")
                     break
             except Exception:
+                time.sleep(2)  # Space out test pings to avoid triggering 429 on startup
                 continue
 
         if not ai_enabled:
-            st.sidebar.error("❌ Gemini API key valid, but no model endpoint responded to generateContent.")
+            st.sidebar.error("❌ Gemini API key valid, but rate-limited at startup. Wait 1 min and refresh.")
     except Exception as e:
         st.sidebar.error(f"❌ Gemini Init Error: {e}")
 else:
@@ -84,7 +63,7 @@ asset_map = {
     "Comm - GOLD": "GC=F", "Comm - SILVER": "SI=F", "Comm - WTI": "CL=F", "Comm - COPPER": "HG=F"
 }
 
-# --- 3. DIAGNOSTIC SENTIMENT ENGINE ---
+# --- 3. RETRY-ENABLED SENTIMENT ENGINE ---
 def get_news_sentiment(ticker_symbol, asset_name):
     if not ai_enabled or gemini is None:
         return 0.0, "API key missing/failed"
@@ -117,16 +96,30 @@ def get_news_sentiment(ticker_symbol, asset_name):
         Example: 0.55
         """
         
-        response = gemini.generate_content(prompt)
-        text = response.text.strip() if response and response.text else ""
-        
-        match = re.search(r"[-+]?\d*\.\d+|\d+", text)
-        if match:
-            score = float(match.group())
-            return max(-1.0, min(1.0, score)), "OK"
-        return 0.0, f"Parse error ({text[:15]})"
+        # 3-Attempt Retry Loop for 429 Rate Limits
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = gemini.generate_content(prompt)
+                text = response.text.strip() if response and response.text else ""
+                
+                match = re.search(r"[-+]?\d*\.\d+|\d+", text)
+                if match:
+                    score = float(match.group())
+                    return max(-1.0, min(1.0, score)), "OK"
+                return 0.0, f"Parse error ({text[:15]})"
+            except Exception as e:
+                err_msg = str(e)
+                if "429" in err_msg or "quota" in err_msg.lower():
+                    if attempt < max_retries - 1:
+                        time.sleep(5)  # Pause 5 seconds on 429 error and retry
+                        continue
+                    return 0.0, "429 Rate Limit Exceeded"
+                return 0.0, f"API Error: {err_msg[:25]}"
+                
+        return 0.0, "Max Retries Exceeded"
     except Exception as e:
-        return 0.0, f"API Error: {str(e)[:25]}"
+        return 0.0, f"Error: {str(e)[:20]}"
 
 # --- 4. OPTIMIZED QUANT ENGINE ---
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -250,7 +243,7 @@ if st.button("🚀 Run All-Assets Analysis"):
             })
         
         progress_bar.progress((idx + 1) / total_assets)
-        time.sleep(1)
+        time.sleep(4)  # 4-second delay keeps execution under 15 requests/minute
         
     status_text.text("Analysis complete!")
     st.success("Master Market Sweep Complete!")
