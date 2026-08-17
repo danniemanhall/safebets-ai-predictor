@@ -23,7 +23,8 @@ gemini_error = ""
 if "GEMINI_API_KEY" in st.secrets and str(st.secrets["GEMINI_API_KEY"]).strip():
     try:
         genai.configure(api_key=str(st.secrets["GEMINI_API_KEY"]).strip())
-        gemini = genai.GenerativeModel('gemini-1.5-flash')
+        # Updated active Gemini Flash model endpoint
+        gemini = genai.GenerativeModel('gemini-2.5-flash')
         ai_enabled = True
         st.sidebar.success("✅ Gemini API Connected")
     except Exception as e:
@@ -64,7 +65,6 @@ def get_news_sentiment(ticker_symbol, asset_name):
         headlines = []
         for item in news[:4]:
             if isinstance(item, dict):
-                # Handles all yfinance news output variations
                 title = (
                     item.get('title') 
                     or item.get('content', {}).get('title') 
@@ -93,7 +93,7 @@ def get_news_sentiment(ticker_symbol, asset_name):
             return max(-1.0, min(1.0, score)), "OK"
         return 0.0, f"Parse error ({text[:15]})"
     except Exception as e:
-        return 0.0, f"API Error: {str(e)[:25]}"
+        return 0.0, f"API Error: {str(e)}"
 
 # --- 4. OPTIMIZED QUANT ENGINE ---
 @st.cache_data(ttl=1800, show_spinner=False)
