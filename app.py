@@ -5,35 +5,75 @@ import numpy as np
 import xgboost as xgb
 from sklearn.metrics import mean_absolute_error, accuracy_score
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, VotingRegressor
+import google.generativeai as genai
 
 st.set_page_config(page_title="SafeBets Multi-Horizon AI", page_icon="📈", layout="wide")
 
-# --- 1. PASSCODE SECURITY ---
+# --- 1. SECURE CONFIGURATION ---
 password = st.text_input("Enter Password", type="password")
 if password != "admin123":
     st.warning("Please enter the password to access the dashboard.")
     st.stop()
 
+# Initialize Gemini AI
+try:
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    gemini = genai.GenerativeModel('gemini-2.5-flash') # Using the fast, free tier model
+    ai_enabled = True
+except Exception as e:
+    ai_enabled = False
+    st.sidebar.error("Gemini API not configured properly in Secrets.")
+
 # --- 2. ASSET MAP ---
 asset_map = {
-    # Crypto
     "Crypto - BTC": "BTC-USD", "Crypto - ETH": "ETH-USD", "Crypto - SOL": "SOL-USD", 
     "Crypto - DOGE": "DOGE-USD", "Crypto - AVAX": "AVAX-USD", "Crypto - LINK": "LINK-USD", "Crypto - HYPE": "HYPE-USD",
-    
-    # Big Tech
     "Tech - NVDA": "NVDA", "Tech - TSLA": "TSLA", "Tech - AAPL": "AAPL", "Tech - MSFT": "MSFT", 
     "Tech - AMZN": "AMZN", "Tech - META": "META", "Tech - GOOGL": "GOOGL", "Tech - NFLX": "NFLX", "Tech - SPCX": "SPCX",
-    
-    # AI Chips
     "Chips - AMD": "AMD", "Chips - MU": "MU", "Chips - SNDK": "SNDK", "Chips - AVGO": "AVGO", 
     "Chips - INTC": "INTC", "Chips - ARM": "ARM",
-    
-    # Commodities
     "Comm - GOLD": "GC=F", "Comm - SILVER": "SI=F", "Comm - WTI": "CL=F", "Comm - COPPER": "HG=F"
 }
 
-# --- 3. ENSEMBLE PREDICTION ENGINE ---
-@st.cache_data(ttl=3600)  # Caches results for 1 hour to keep dashboard fast
+# --- 3. NLP SENTIMENT ENGINE ---
+@st.cache_data(ttl=3600)
+def get_news_sentiment(ticker_symbol, asset_name):
+    if not ai_enabled:
+        return 0.0, "AI Sentiment disabled (check API key)."
+    
+    try:
+        # Fetch the top 5 recent news headlines for the asset
+        ticker = yf.Ticker(ticker_symbol)
+        news = ticker.news
+        if not news:
+            return 0.0, "No recent news found for this asset."
+            
+        headlines = "\n".join([item['title'] for item in news[:5]])
+        
+        # Prompt Gemini to score the headlines
+        prompt = f"""
+        You are an expert quantitative financial analyst. 
+        Read the following recent news headlines for {asset_name}:
+        {headlines}
+        
+        Provide a sentiment score between -1.0 (highly bearish/negative) and 1.0 (highly bullish/positive).
+        Then provide a 1-sentence explanation of why.
+        Format your response EXACTLY like this: [SCORE] | [EXPLANATION]
+        Example: 0.8 | Strong earnings reports and new AI chip demand are driving positive momentum.
+        """
+        
+        response = gemini.generate_content(prompt)
+        parts = response.text.split('|')
+        
+        score = float(parts[0].strip())
+        explanation = parts[1].strip()
+        return score, explanation
+        
+    except Exception as e:
+        return 0.0, f"Could not generate sentiment. Error: {e}"
+
+# --- 4. QUANT PREDICTION ENGINE (Ensemble) ---
+@st.cache_data(ttl=3600)
 def get_exact_price_predictions(ticker_symbol):
     try:
         df = yf.Ticker(ticker_symbol).history(period="5y")
@@ -42,7 +82,6 @@ def get_exact_price_predictions(ticker_symbol):
             
         df = df[['Close', 'Volume']].copy()
         
-        # Technical Indicator Feature Engineering
         df['Return'] = df['Close'].pct_change()
         df['SMA_10'] = df['Close'].rolling(window=10).mean()
         df['SMA_50'] = df['Close'].rolling(window=50).mean()
@@ -69,11 +108,7 @@ def get_exact_price_predictions(ticker_symbol):
         df.replace([np.inf, -np.inf], 0, inplace=True)
         df = df.dropna() 
         
-        if len(df) < 100:
-            return None, None, None 
-            
         features = ['Return', 'SMA_10', 'SMA_50', 'RSI', 'BB_Position', 'MACD', 'MACD_Hist', 'Volume_Change']
-        
         latest_price = df['Close'].iloc[-1]
         X_today = df.iloc[[-1]][features]
         historical_data = df.iloc[:-1].copy()
@@ -82,7 +117,6 @@ def get_exact_price_predictions(ticker_symbol):
         results = {}
         
         for name, days in horizons.items():
-            # Percentage return target over 'days'
             target_return = (historical_data['Close'].shift(-days) - historical_data['Close']) / historical_data['Close']
             
             valid_idx = historical_data.index[:-days]
@@ -93,22 +127,10 @@ def get_exact_price_predictions(ticker_symbol):
             X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
             y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
             
-            # --- 3-MODEL ENSEMBLE ---
-            xgb_model = xgb.XGBRegressor(
-                objective='reg:squarederror', random_state=42, learning_rate=0.03, max_depth=4, n_estimators=100
-            )
-            rf_model = RandomForestRegressor(
-                n_estimators=100, random_state=42, max_depth=4
-            )
-            gb_model = GradientBoostingRegressor(
-                n_estimators=100, random_state=42, learning_rate=0.03, max_depth=4
-            )
-            
-            # Voting Ensemble averages predictions from all 3 models
             model = VotingRegressor(estimators=[
-                ('xgb', xgb_model),
-                ('rf', rf_model),
-                ('gb', gb_model)
+                ('xgb', xgb.XGBRegressor(objective='reg:squarederror', random_state=42, learning_rate=0.03, max_depth=4, n_estimators=100)),
+                ('rf', RandomForestRegressor(n_estimators=100, random_state=42, max_depth=4)),
+                ('gb', GradientBoostingRegressor(n_estimators=100, random_state=42, learning_rate=0.03, max_depth=4))
             ])
             model.fit(X_train, y_train)
             
@@ -132,57 +154,57 @@ def get_exact_price_predictions(ticker_symbol):
     except Exception:
         return None, None, None
 
-# --- 4. DASHBOARD INTERFACE ---
+# --- 5. DASHBOARD INTERFACE ---
 st.title("📈 SafeBets Master Multi-Horizon Predictor")
 
-tab1, tab2 = st.tabs(["📊 Master Table (All Assets)", "🔍 Single Asset Detailed View"])
+tab1, tab2 = st.tabs(["📊 Master Table (Quant Only)", "🔍 Detailed View (Quant + NLP Sentiment)"])
 
-# --- TAB 1: ALL ASSETS AT ONCE ---
 with tab1:
     st.subheader("Daily All-Assets Prediction Table")
-    st.markdown("Click below to train ensemble models and generate targets for all assets simultaneously.")
-    
     if st.button("🚀 Generate All Market Predictions"):
         master_rows = []
         progress_bar = st.progress(0)
         total_assets = len(asset_map)
         
         for idx, (asset_name, ticker) in enumerate(asset_map.items()):
-            st.toast(f"Processing {asset_name}...", icon="⏳")
             results, price, _ = get_exact_price_predictions(ticker)
-            
             if results is not None:
                 master_rows.append({
                     "Asset": asset_name,
                     "Current Price": f"${price:,.2f}",
-                    "1D Target": f"${results['1D']['predicted_price']:,.2f} ({results['1D']['percent_change']:+.2f}%)",
-                    "7D Target": f"${results['7D']['predicted_price']:,.2f} ({results['7D']['percent_change']:+.2f}%)",
-                    "14D Target": f"${results['14D']['predicted_price']:,.2f} ({results['14D']['percent_change']:+.2f}%)",
-                    "30D Target": f"${results['30D']['predicted_price']:,.2f} ({results['30D']['percent_change']:+.2f}%)",
+                    "1D Target": f"${results['1D']['predicted_price']:,.2f}",
+                    "7D Target": f"${results['7D']['predicted_price']:,.2f}",
+                    "14D Target": f"${results['14D']['predicted_price']:,.2f}",
+                    "30D Target": f"${results['30D']['predicted_price']:,.2f}",
                 })
-            
             progress_bar.progress((idx + 1) / total_assets)
             
-        st.success("All market predictions generated successfully!")
-        
+        st.success("All quantitative predictions generated successfully!")
         if master_rows:
-            summary_df = pd.DataFrame(master_rows)
-            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(master_rows), use_container_width=True, hide_index=True)
 
-# --- TAB 2: SINGLE ASSET DETAILED VIEW ---
 with tab2:
     selected_asset = st.selectbox("Select Asset for Detailed View", list(asset_map.keys()))
     ticker = asset_map[selected_asset]
 
-    if st.button("Generate Detailed Prediction"):
-        with st.spinner(f"Running ensemble analysis for {selected_asset}..."):
+    if st.button("Generate Detailed Prediction & Read News"):
+        with st.spinner(f"Running Ensemble Math & Analyzing News for {selected_asset}..."):
+            
+            # Fetch Math & Sentiment Concurrently
             results, price, df = get_exact_price_predictions(ticker)
+            sentiment_score, sentiment_summary = get_news_sentiment(ticker, selected_asset)
             
             if results is None:
-                st.error("Not enough historical data available for this symbol.")
+                st.error("Not enough historical data available.")
                 st.stop()
                 
             st.divider()
+            
+            # --- DUAL SIGNAL DISPLAY ---
+            score_color = "green" if sentiment_score > 0 else "red" if sentiment_score < 0 else "gray"
+            st.markdown(f"### 🧠 AI News Sentiment: :{score_color}[{sentiment_score}]")
+            st.info(f"**Gemini Analysis:** {sentiment_summary}")
+            
             st.metric("Current Price", f"${price:,.2f}")
             
             cols = st.columns(4)
@@ -191,21 +213,14 @@ with tab2:
             for i, col in enumerate(cols):
                 horizon = horizons[i]
                 data = results[horizon]
-                
-                target_p = data['predicted_price']
-                d_change = data['dollar_change']
-                p_change = data['percent_change']
-                
                 with col:
                     st.subheader(f"{horizon} Forecast")
                     st.metric(
                         label="Target Price", 
-                        value=f"${target_p:,.2f}", 
-                        delta=f"{d_change:+.2f} ({p_change:+.2f}%)"
+                        value=f"${data['predicted_price']:,.2f}", 
+                        delta=f"{data['dollar_change']:+.2f} ({data['percent_change']:+.2f}%)"
                     )
-                    st.caption(f"Directional Acc: {data['dir_accuracy'] * 100:.1f}%")
-                    st.caption(f"Avg Error: ±${data['avg_dollar_error']:,.2f}")
+                    st.caption(f"Quant Acc: {data['dir_accuracy'] * 100:.1f}%")
             
             st.divider()
-            st.subheader(f"90-Day Price History ({selected_asset})")
             st.line_chart(df['Close'].tail(90))
