@@ -21,7 +21,7 @@ try:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
     gemini = genai.GenerativeModel('gemini-2.5-flash')
     ai_enabled = True
-except Exception as e:
+except Exception:
     ai_enabled = False
     st.sidebar.error("Gemini API key not found in Streamlit Secrets.")
 
@@ -43,7 +43,8 @@ asset_map = {
     "Comm - GOLD": "GC=F", "Comm - SILVER": "SI=F", "Comm - WTI": "CL=F", "Comm - COPPER": "HG=F"
 }
 
-# --- 3. SENTIMENT ENGINE ---
+# --- 3. CACHED SENTIMENT ENGINE ---
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_news_sentiment(ticker_symbol, asset_name):
     if not ai_enabled:
         return 0.0
@@ -54,29 +55,26 @@ def get_news_sentiment(ticker_symbol, asset_name):
         if not news:
             return 0.0
             
-        headlines = "\n".join([item['title'] for item in news[:5]])
+        headlines = "\n".join([item['title'] for item in news[:3]])
         
         prompt = f"""
-        You are a quantitative financial analyst. 
-        Read these news headlines for {asset_name}:
+        You are a financial analyst. Read these news headlines for {asset_name}:
         {headlines}
-        
-        Output ONLY a single sentiment float number between -1.0 (highly bearish) and 1.0 (highly bullish). 
-        Do not write any words or explanations, just the number. Example: 0.65
+        Output ONLY a single sentiment float between -1.0 (bearish) and 1.0 (bullish).
+        Do not write words. Example: 0.40
         """
         
         response = gemini.generate_content(prompt)
-        score = float(response.text.strip())
-        return score
+        return float(response.text.strip())
     except Exception:
         return 0.0
 
-# --- 4. QUANT ENGINE ---
-@st.cache_data(ttl=3600)
+# --- 4. OPTIMIZED QUANT ENGINE ---
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_exact_price_predictions(ticker_symbol):
     try:
-        df = yf.Ticker(ticker_symbol).history(period="5y")
-        if df.empty or len(df) < 100:
+        df = yf.Ticker(ticker_symbol).history(period="2y")
+        if df.empty or len(df) < 60:
             return None, None, None
             
         df = df[['Close', 'Volume']].copy()
@@ -89,14 +87,14 @@ def get_exact_price_predictions(ticker_symbol):
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
+        rs = gain / (loss + 1e-9)
         df['RSI'] = 100 - (100 / (1 + rs))
         
         df['SMA_20'] = df['Close'].rolling(window=20).mean()
         df['STD_20'] = df['Close'].rolling(window=20).std()
         df['BB_Upper'] = df['SMA_20'] + (df['STD_20'] * 2)
         df['BB_Lower'] = df['SMA_20'] - (df['STD_20'] * 2)
-        df['BB_Position'] = (df['Close'] - df['BB_Lower']) / (df['BB_Upper'] - df['BB_Lower'])
+        df['BB_Position'] = (df['Close'] - df['BB_Lower']) / (df['BB_Upper'] - df['BB_Lower'] + 1e-9)
         
         df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
         df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
@@ -124,14 +122,14 @@ def get_exact_price_predictions(ticker_symbol):
             y = target_return.loc[valid_idx]
             
             split_index = int(len(X) * 0.8)
-            X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
-            y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
+            X_train = X.iloc[:split_index]
+            y_train = y.iloc[:split_index]
             
-            # Voting Ensemble (XGBoost + Random Forest + Gradient Boosting)
+            # Fast-Fitting Voting Ensemble
             model = VotingRegressor(estimators=[
-                ('xgb', xgb.XGBRegressor(objective='reg:squarederror', random_state=42, learning_rate=0.03, max_depth=4, n_estimators=100)),
-                ('rf', RandomForestRegressor(n_estimators=100, random_state=42, max_depth=4)),
-                ('gb', GradientBoostingRegressor(n_estimators=100, random_state=42, learning_rate=0.03, max_depth=4))
+                ('xgb', xgb.XGBRegressor(objective='reg:squarederror', random_state=42, learning_rate=0.05, max_depth=3, n_estimators=30, n_jobs=1)),
+                ('rf', RandomForestRegressor(n_estimators=30, random_state=42, max_depth=3, n_jobs=-1)),
+                ('gb', GradientBoostingRegressor(n_estimators=30, random_state=42, learning_rate=0.05, max_depth=3))
             ])
             model.fit(X_train, y_train)
             
@@ -149,53 +147,51 @@ def get_exact_price_predictions(ticker_symbol):
 
 # --- 5. DASHBOARD INTERFACE ---
 st.title("📈 SafeBets Master Prediction Table")
-st.markdown("Generates **Math Ensemble Price Targets** automatically adjusted by **Gemini AI News Sentiment** for all assets.")
+st.markdown("Generates **Math Ensemble Price Targets** adjusted by **Gemini AI News Sentiment**.")
 
-if st.button("🚀 Run Complete All-Assets Analysis (Math + News Sentiment)"):
+if st.button("🚀 Run Fast All-Assets Analysis"):
     master_rows = []
     progress_bar = st.progress(0)
+    status_text = st.empty()
     total_assets = len(asset_map)
     
     for idx, (asset_name, ticker) in enumerate(asset_map.items()):
-        st.toast(f"Analyzing {asset_name} (Math + Gemini Sentiment)...", icon="⏳")
+        status_text.text(f"Processing ({idx + 1}/{total_assets}): {asset_name}")
         
-        # 1. Fetch Math Target Price from Ensemble
+        # 1. Quant Predictions
         results, price, _ = get_exact_price_predictions(ticker)
         
-        # 2. Fetch Gemini News Sentiment (-1.0 to +1.0)
+        # 2. Gemini News Sentiment
         sentiment_score = get_news_sentiment(ticker, asset_name)
         
         if results is not None:
-            # Format sentiment indicator text
             sentiment_text = f"🟢 +{sentiment_score:.2f}" if sentiment_score > 0.1 else f"🔴 {sentiment_score:.2f}" if sentiment_score < -0.1 else f"⚪ {sentiment_score:.2f}"
             
-            # 3. Apply Sentiment Weight (1.5% max impact) to the math target
             sentiment_weight = 0.015 
-            
             adjusted_targets = {}
+            
             for h in ['1D', '7D', '14D', '30D']:
                 raw_target = results[h]['predicted_price']
                 adjusted_target = raw_target * (1 + (sentiment_score * sentiment_weight))
                 adjusted_pct = ((adjusted_target - price) / price) * 100
                 adjusted_targets[h] = f"${adjusted_target:,.2f} ({adjusted_pct:+.2f}%)"
             
-            # 4. Add to summary table
             master_rows.append({
                 "Asset": asset_name,
                 "Current Price": f"${price:,.2f}",
-                "News Sentiment (-1 to +1)": sentiment_text,
-                "1D Target (Adjusted)": adjusted_targets['1D'],
-                "7D Target (Adjusted)": adjusted_targets['7D'],
-                "14D Target (Adjusted)": adjusted_targets['14D'],
-                "30D Target (Adjusted)": adjusted_targets['30D'],
+                "News Sentiment": sentiment_text,
+                "1D Target": adjusted_targets['1D'],
+                "7D Target": adjusted_targets['7D'],
+                "14D Target": adjusted_targets['14D'],
+                "30D Target": adjusted_targets['30D'],
             })
         
         progress_bar.progress((idx + 1) / total_assets)
+        time.sleep(1)  # Minimal 1-second pause to prevent API rate limits
         
-        # Pause 4 seconds between requests to respect Gemini's 15 requests/min rate limit
-        time.sleep(4)
-        
+    status_text.text("Analysis complete!")
     st.success("Master Market Sweep Complete!")
+    
     if master_rows:
         summary_df = pd.DataFrame(master_rows)
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
