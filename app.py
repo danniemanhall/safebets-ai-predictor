@@ -340,27 +340,42 @@ def fit_median_ensemble(X_train, y_train, weights):
     return predict
 
 
-def walk_forward_mae(X, y, days, n_folds):
+SELECTION_MARGIN = 0.005   # must beat the baseline by 0.5% relative to be chosen
+
+
+def walk_forward_compare(X, y, days, n_folds):
     """
-    Out-of-sample MAE against the only baseline that matters here: submitting
-    today's price, i.e. predicting a log return of zero.
+    Score three candidates out-of-sample on identical folds, then let the data
+    pick one. The candidates sit at increasing levels of ambition:
 
-    The label at row t is built from prices at t+days, so a test row within
+      baseline : submit today's price (predict a log return of zero)
+      drift    : submit today's price nudged by the median historical h-day
+                 log return -- a single parameter, estimated on train only
+      model    : the full 16-feature median ensemble
+
+    The drift candidate matters because of a specific asymmetry. If price is
+    roughly a martingale, its log is not: the median of the price distribution
+    sits below the mean by about sigma^2/2. Under percentage-error scoring the
+    median is what you want, so a small constant offset can beat a flat guess
+    with a fraction of the estimation variance an ensemble carries. It was
+    never tested on its own before -- shrinkage multiplied the ensemble's
+    intercept away along with everything else.
+
+    The label at row t is built from prices at t+days, so any test row within
     `days` of the training cut is contaminated. That gap is purged.
-
-    Returns (skill, mae_model, mae_baseline, n_tested) where
-    skill = 1 - MAE(model)/MAE(baseline). Positive means the model beat
-    "enter today's price"; zero or below means it did not.
     """
     n = len(X)
+    blank = {'best': 'baseline', 'skill': 0.0, 'drift': 0.0,
+             'mae': {}, 'n_tested': 0}
+
     if n_folds < 1 or n < 250:
-        return 0.0, np.nan, np.nan, 0
+        return blank
 
     fold_size = n // (n_folds + 1)
     if fold_size <= days + 30:
-        return 0.0, np.nan, np.nan, 0
+        return blank
 
-    preds, actuals = [], []
+    preds_model, preds_drift, actuals = [], [], []
 
     for k in range(1, n_folds + 1):
         train_end = fold_size * k
@@ -370,26 +385,51 @@ def walk_forward_mae(X, y, days, n_folds):
         if train_end < 120 or test_end - test_start < 20:
             continue
 
+        y_tr = y.iloc[:train_end]
+        n_test = test_end - test_start
+
         try:
             predictor = fit_median_ensemble(
-                X.iloc[:train_end], y.iloc[:train_end], _sample_weights(train_end)
+                X.iloc[:train_end], y_tr, _sample_weights(train_end)
             )
-            preds.append(predictor(X.iloc[test_start:test_end]))
-            actuals.append(y.iloc[test_start:test_end].to_numpy())
+            preds_model.append(predictor(X.iloc[test_start:test_end]))
         except Exception:
-            continue
+            preds_model.append(np.zeros(n_test))
 
-    if not preds:
-        return 0.0, np.nan, np.nan, 0
+        # Drift estimated on training data only -- no peeking.
+        preds_drift.append(np.full(n_test, float(np.median(y_tr))))
+        actuals.append(y.iloc[test_start:test_end].to_numpy())
 
-    p = np.concatenate(preds)
+    if not actuals:
+        return blank
+
     a = np.concatenate(actuals)
+    pm = np.concatenate(preds_model)
+    pd_ = np.concatenate(preds_drift)
 
-    mae_model = float(np.mean(np.abs(p - a)))
-    mae_base = float(np.mean(np.abs(a)))       # baseline: predict zero log return
-    skill = 0.0 if mae_base <= 0 else 1.0 - (mae_model / mae_base)
+    mae = {
+        'baseline': float(np.mean(np.abs(a))),
+        'drift': float(np.mean(np.abs(pd_ - a))),
+        'model': float(np.mean(np.abs(pm - a))),
+    }
 
-    return float(skill), mae_model, mae_base, int(len(p))
+    base = mae['baseline']
+    if base <= 0:
+        return blank
+
+    # Pick the winner, but only if it clears the baseline by a real margin.
+    best, best_mae = 'baseline', base
+    for cand in ('drift', 'model'):
+        if mae[cand] < best_mae and mae[cand] < base * (1 - SELECTION_MARGIN):
+            best, best_mae = cand, mae[cand]
+
+    return {
+        'best': best,
+        'skill': 1.0 - (best_mae / base),
+        'drift': float(np.median(y)),
+        'mae': mae,
+        'n_tested': int(len(a)),
+    }
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -426,26 +466,30 @@ def get_predictions(ticker_symbol, shrink_enabled=True, folds=DEFAULT_FOLDS):
             if len(X) < 250:
                 continue
 
-            skill, mae_model, mae_base, n_tested = walk_forward_mae(X, y, days, folds)
-
-            predictor = fit_median_ensemble(X, y, _sample_weights(len(X)))
-            pred_log = float(predictor(X_today)[0])
-
+            cmp = walk_forward_compare(X, y, days, folds)
             horizon_sigma = daily_sigma * np.sqrt(days)
+
+            if cmp['best'] == 'model':
+                predictor = fit_median_ensemble(X, y, _sample_weights(len(X)))
+                pred_log = float(predictor(X_today)[0])
+            elif cmp['best'] == 'drift':
+                pred_log = cmp['drift']
+            else:
+                pred_log = 0.0
+
             cap = MAX_SIGMA_CLIP * horizon_sigma
             pred_log = float(np.clip(pred_log, -cap, cap))
 
-            shrink = float(np.clip(skill, 0.0, 1.0)) if shrink_enabled else 1.0
+            shrink = float(np.clip(cmp['skill'], 0.0, 1.0)) if shrink_enabled else 1.0
             effective_log = pred_log * shrink
 
             results[name] = {
                 'price': latest_price * float(np.exp(effective_log)),
                 'pct': (float(np.exp(effective_log)) - 1.0) * 100.0,
-                'raw_log': pred_log,
-                'skill': skill,
-                'mae_model_pct': mae_model * 100 if np.isfinite(mae_model) else np.nan,
-                'mae_base_pct': mae_base * 100 if np.isfinite(mae_base) else np.nan,
-                'n_tested': n_tested,
+                'source': cmp['best'],
+                'skill': cmp['skill'],
+                'mae': cmp['mae'],
+                'n_tested': cmp['n_tested'],
                 'lo': latest_price * float(np.exp(effective_log - BAND_Z * horizon_sigma)),
                 'hi': latest_price * float(np.exp(effective_log + BAND_Z * horizon_sigma)),
             }
@@ -509,12 +553,14 @@ if st.button("🚀 Run All-Assets Analysis"):
                     cell += f"\n[{fmt.format(lo)} – {fmt.format(hi)}]"
                 sub[h] = cell
 
-                mark = "🟢" if r['skill'] > 0.005 else ("⚪" if r['skill'] > -0.02 else "🔴")
-                diag[f"{h} skill"] = f"{mark} {r['skill']:+.3f}"
+                icon = {'baseline': '⚪ today', 'drift': '🟡 drift', 'model': '🟢 model'}
+                diag[f"{h} uses"] = icon.get(r['source'], r['source'])
+                m = r['mae']
                 diag[f"{h} err"] = (
-                    f"{r['mae_model_pct']:.2f}% vs {r['mae_base_pct']:.2f}%"
-                    if np.isfinite(r['mae_model_pct']) else "n/a"
-                )
+                    f"today {m['baseline']*100:.2f}% | "
+                    f"drift {m['drift']*100:.2f}% | "
+                    f"model {m['model']*100:.2f}%"
+                ) if m else "n/a"
 
             submission_rows.append(sub)
             diagnostic_rows.append(diag)
@@ -531,13 +577,16 @@ if st.button("🚀 Run All-Assets Analysis"):
         st.dataframe(pd.DataFrame(diagnostic_rows), use_container_width=True, hide_index=True)
 
         st.markdown(
-            "**Skill** is `1 - MAE(model) / MAE(enter today's price)`, measured "
-            "out-of-sample with a purge gap. **Err** shows the model's mean "
-            "absolute percentage error next to the baseline's. Green means the "
-            "model genuinely beat the baseline on that asset and horizon; grey "
-            "or red means it did not, and with shrinkage on, that target has "
-            "collapsed to today's price — which under percentage-error scoring "
-            "is the correct submission, not a failure. Expect most cells to be "
-            "grey. The 1D column is the hardest to beat and the 30D column the "
-            "easiest, because the baseline's own error grows with the horizon."
+            "**Uses** shows which of three candidates won on out-of-sample data "
+            "for that asset and horizon: `today` (submit the current price), "
+            "`drift` (current price nudged by the median historical log return, "
+            "one parameter), or `model` (the full ensemble). **Err** lists all "
+            "three mean absolute percentage errors so you can see the margin. "
+            "A candidate only displaces `today` if it beats it by at least "
+            "0.5% relative, so ties go to the simpler option.\n\n"
+            "Most cells reading `today` is the expected outcome, not a broken "
+            "model — under percentage-error scoring the current price is a very "
+            "strong submission. If `drift` wins on the longer horizons, that is "
+            "the volatility-drag effect being picked up, and it is the most "
+            "likely place to find a real edge."
         )
