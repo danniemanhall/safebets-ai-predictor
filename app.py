@@ -5,18 +5,37 @@ import numpy as np
 import xgboost as xgb
 from sklearn.metrics import accuracy_score
 
-# --- 1. SECURITY (Password Protection) ---
-st.set_page_config(page_title="SafeBets AI Predictor", page_icon="📈")
+st.set_page_config(page_title="SafeBets Multi-Horizon AI", page_icon="📈", layout="wide")
 
 password = st.text_input("Enter Password", type="password")
 if password != "admin123":
     st.warning("Please enter the password to access the dashboard.")
-    st.stop() # Stops the rest of the app from loading until the password is correct
+    st.stop()
 
-# --- 2. AI MODEL FUNCTION ---
-@st.cache_data # This tells Streamlit not to re-download the data every time you click a button
-def get_prediction(ticker_symbol):
+# --- EXPANDED ASSET MAP ---
+asset_map = {
+    # Crypto
+    "Crypto - BTC": "BTC-USD", "Crypto - ETH": "ETH-USD", "Crypto - SOL": "SOL-USD", 
+    "Crypto - DOGE": "DOGE-USD", "Crypto - AVAX": "AVAX-USD", "Crypto - LINK": "LINK-USD", "Crypto - HYPE": "HYPE-USD",
+    
+    # Big Tech
+    "Tech - NVDA": "NVDA", "Tech - TSLA": "TSLA", "Tech - AAPL": "AAPL", "Tech - MSFT": "MSFT", 
+    "Tech - AMZN": "AMZN", "Tech - META": "META", "Tech - GOOGL": "GOOGL", "Tech - NFLX": "NFLX", "Tech - SPCX": "SPCX",
+    
+    # AI Chips
+    "Chips - AMD": "AMD", "Chips - MU": "MU", "Chips - SNDK": "SNDK", "Chips - AVGO": "AVGO", 
+    "Chips - INTC": "INTC", "Chips - ARM": "ARM",
+    
+    # Commodities
+    "Comm - GOLD": "GC=F", "Comm - SILVER": "SI=F", "Comm - WTI": "CL=F", "Comm - COPPER": "HG=F"
+}
+
+@st.cache_data
+def get_multi_horizon_predictions(ticker_symbol):
     df = yf.Ticker(ticker_symbol).history(period="5y")
+    if df.empty:
+        return None, None, None
+        
     df = df[['Close', 'Volume']].copy()
     
     # Feature Engineering
@@ -44,61 +63,85 @@ def get_prediction(ticker_symbol):
     
     df['Volume_Change'] = df['Volume'].pct_change()
     df.replace([np.inf, -np.inf], 0, inplace=True)
+    df = df.dropna() 
     
-    df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
-    df = df.dropna()
-
-    historical_data = df.iloc[:-1]
-    todays_data = df.iloc[[-1]]
-    
+    if len(df) < 100:
+        return None, None, None 
+        
     features = ['Return', 'SMA_10', 'SMA_50', 'RSI', 'BB_Position', 'MACD', 'MACD_Hist', 'Volume_Change']
     
-    X = historical_data[features]
-    y = historical_data['Target']
+    # Isolate today's data to predict the future
+    X_today = df.iloc[[-1]][features]
+    historical_data = df.iloc[:-1].copy()
     
-    split_index = int(len(X) * 0.8)
-    X_train, X_test = X[:split_index], X[split_index:]
-    y_train, y_test = y[:split_index], y[split_index:]
+    # The different time horizons we want to predict
+    horizons = {'1D': 1, '7D': 7, '14D': 14, '30D': 30}
+    results = {}
     
-    model = xgb.XGBClassifier(eval_metric='logloss', random_state=42, learning_rate=0.05, max_depth=4)
-    model.fit(X_train, y_train)
-    
-    accuracy = accuracy_score(y_test, model.predict(X_test))
-    
-    X_today = todays_data[features]
-    prediction = model.predict(X_today)[0]
-    probability = model.predict_proba(X_today)[0]
-    
-    latest_price = todays_data['Close'].iloc[-1]
-    
-    return accuracy, prediction, probability, latest_price, df
+    for name, days in horizons.items():
+        # Create target shifted by 'days'
+        target = (historical_data['Close'].shift(-days) > historical_data['Close']).astype(int)
+        
+        # We must drop the last 'days' rows during training because the future hasn't happened yet
+        valid_idx = historical_data.index[:-days]
+        X = historical_data.loc[valid_idx, features]
+        y = target.loc[valid_idx]
+        
+        split_index = int(len(X) * 0.8)
+        X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
+        y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
+        
+        # Train a brand new model just for this specific time horizon
+        model = xgb.XGBClassifier(eval_metric='logloss', random_state=42, learning_rate=0.05, max_depth=4)
+        model.fit(X_train, y_train)
+        
+        acc = accuracy_score(y_test, model.predict(X_test))
+        pred = model.predict(X_today)[0]
+        prob = model.predict_proba(X_today)[0]
+        
+        results[name] = {
+            'accuracy': acc,
+            'prediction': pred,
+            'confidence': prob[1] if pred == 1 else prob[0]
+        }
+        
+    latest_price = df['Close'].iloc[-1]
+    return results, latest_price, df
 
-# --- 3. DASHBOARD UI ---
-st.title("📈 AI Commodity Predictor")
-st.markdown("Use these daily figures to enter into **SafeBets**.")
+# --- DASHBOARD UI ---
+st.title("📈 SafeBets Multi-Horizon Predictor")
+st.markdown("Select an asset below to generate independent AI predictions for 1, 7, 14, and 30 days out.")
 
-# Let the user choose the commodity
-commodity_map = {"Gold": "GC=F", "Crude Oil": "CL=F", "Natural Gas": "NG=F"}
-selected_commodity = st.selectbox("Select Commodity to Predict", list(commodity_map.keys()))
-ticker = commodity_map[selected_commodity]
+selected_asset = st.selectbox("Select Asset", list(asset_map.keys()))
+ticker = asset_map[selected_asset]
 
-if st.button("Generate Today's Prediction"):
-    with st.spinner(f"Analyzing data for {selected_commodity}..."):
-        acc, pred, prob, price, df = get_prediction(ticker)
+if st.button("Generate Predictions"):
+    with st.spinner(f"Training 4 AI models for {selected_asset}..."):
+        results, price, df = get_multi_horizon_predictions(ticker)
+        
+        if results is None:
+            st.error("Not enough historical data to generate predictions for this asset.")
+            st.stop()
+            
+        st.divider()
+        st.metric("Current Price", f"${price:,.2f}")
+        
+        # Display the 4 time horizons side-by-side
+        cols = st.columns(4)
+        horizons = ['1D', '7D', '14D', '30D']
+        
+        for i, col in enumerate(cols):
+            horizon = horizons[i]
+            data = results[horizon]
+            
+            direction = "⬆️ UP" if data['prediction'] == 1 else "⬇️ DOWN"
+            
+            with col:
+                st.subheader(f"{horizon} Forecast")
+                st.metric("Trend", direction)
+                st.metric("Confidence", f"{data['confidence'] * 100:.1f}%")
+                st.caption(f"Backtest Acc: {data['accuracy'] * 100:.1f}%")
         
         st.divider()
-        
-        # Display large metrics
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Current Price", f"${price:.2f}")
-        
-        direction = "⬆️ UP" if pred == 1 else "⬇️ DOWN"
-        conf = prob[1] if pred == 1 else prob[0]
-        col2.metric("Tomorrow's Prediction", direction)
-        col3.metric("AI Confidence", f"{conf * 100:.1f}%")
-        
-        st.caption(f"Model Backtest Historical Accuracy: {acc * 100:.1f}%")
-        
-        # Show a chart of the last 30 days
-        st.subheader(f"30-Day Price Trend ({selected_commodity})")
-        st.line_chart(df['Close'].tail(30))
+        st.subheader(f"90-Day Price Trend ({selected_asset})")
+        st.line_chart(df['Close'].tail(90))
