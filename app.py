@@ -10,25 +10,45 @@ from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, V
 
 st.set_page_config(page_title="SafeBets Master Multi-Horizon Predictor", page_icon="📈", layout="wide")
 
-# --- 1. SECURE CONFIGURATION & DIAGNOSTICS ---
+# --- 1. SECURE CONFIGURATION & DYNAMIC MODEL DISCOVERY ---
 password = st.text_input("Enter Password", type="password")
 if password != "admin123":
     st.warning("Please enter the password to access the dashboard.")
     st.stop()
 
 ai_enabled = False
-gemini_error = ""
+gemini = None
 
-# Sidebar connection status check
+# Sidebar connection & dynamic model resolution
 if "GEMINI_API_KEY" in st.secrets and str(st.secrets["GEMINI_API_KEY"]).strip():
     try:
         genai.configure(api_key=str(st.secrets["GEMINI_API_KEY"]).strip())
-        # Updated active Gemini Flash model endpoint
-        gemini = genai.GenerativeModel('gemini-2.5-flash')
-        ai_enabled = True
-        st.sidebar.success("✅ Gemini API Connected")
+        
+        # Query Google AI Studio for active generation models tied to your API key
+        selected_model = None
+        all_models = list(genai.list_models())
+        
+        # Priority 1: Find an active Flash model
+        for m in all_models:
+            if 'generateContent' in m.supported_generation_methods and 'flash' in m.name.lower():
+                selected_model = m.name
+                break
+                
+        # Priority 2: Fallback to any active text generation model
+        if not selected_model:
+            for m in all_models:
+                if 'generateContent' in m.supported_generation_methods:
+                    selected_model = m.name
+                    break
+                    
+        if selected_model:
+            gemini = genai.GenerativeModel(selected_model)
+            ai_enabled = True
+            clean_name = selected_model.replace("models/", "")
+            st.sidebar.success(f"✅ Gemini API Connected ({clean_name})")
+        else:
+            st.sidebar.error("❌ No active generation models available for this key.")
     except Exception as e:
-        gemini_error = str(e)
         st.sidebar.error(f"❌ Gemini Init Error: {e}")
 else:
     st.sidebar.error("❌ GEMINI_API_KEY missing in Secrets")
@@ -53,7 +73,7 @@ asset_map = {
 
 # --- 3. DIAGNOSTIC SENTIMENT ENGINE ---
 def get_news_sentiment(ticker_symbol, asset_name):
-    if not ai_enabled:
+    if not ai_enabled or gemini is None:
         return 0.0, "API key missing/failed"
     
     try:
@@ -93,7 +113,7 @@ def get_news_sentiment(ticker_symbol, asset_name):
             return max(-1.0, min(1.0, score)), "OK"
         return 0.0, f"Parse error ({text[:15]})"
     except Exception as e:
-        return 0.0, f"API Error: {str(e)}"
+        return 0.0, f"API Error: {str(e)[:25]}"
 
 # --- 4. OPTIMIZED QUANT ENGINE ---
 @st.cache_data(ttl=1800, show_spinner=False)
