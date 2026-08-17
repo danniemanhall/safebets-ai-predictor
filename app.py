@@ -30,141 +30,168 @@ asset_map = {
     "Comm - GOLD": "GC=F", "Comm - SILVER": "SI=F", "Comm - WTI": "CL=F", "Comm - COPPER": "HG=F"
 }
 
-@st.cache_data
+@st.cache_data(ttl=3600)  # Caches results for 1 hour to keep the dashboard fast
 def get_exact_price_predictions(ticker_symbol):
-    df = yf.Ticker(ticker_symbol).history(period="5y")
-    if df.empty:
+    try:
+        df = yf.Ticker(ticker_symbol).history(period="5y")
+        if df.empty or len(df) < 100:
+            return None, None, None
+            
+        df = df[['Close', 'Volume']].copy()
+        
+        # Feature Engineering
+        df['Return'] = df['Close'].pct_change()
+        df['SMA_10'] = df['Close'].rolling(window=10).mean()
+        df['SMA_50'] = df['Close'].rolling(window=50).mean()
+        
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
+        
+        df['SMA_20'] = df['Close'].rolling(window=20).mean()
+        df['STD_20'] = df['Close'].rolling(window=20).std()
+        df['BB_Upper'] = df['SMA_20'] + (df['STD_20'] * 2)
+        df['BB_Lower'] = df['SMA_20'] - (df['STD_20'] * 2)
+        df['BB_Position'] = (df['Close'] - df['BB_Lower']) / (df['BB_Upper'] - df['BB_Lower'])
+        
+        df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
+        df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
+        df['MACD'] = df['EMA_12'] - df['EMA_26']
+        df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+        
+        df['Volume_Change'] = df['Volume'].pct_change()
+        df.replace([np.inf, -np.inf], 0, inplace=True)
+        df = df.dropna() 
+        
+        if len(df) < 100:
+            return None, None, None 
+            
+        features = ['Return', 'SMA_10', 'SMA_50', 'RSI', 'BB_Position', 'MACD', 'MACD_Hist', 'Volume_Change']
+        
+        latest_price = df['Close'].iloc[-1]
+        X_today = df.iloc[[-1]][features]
+        historical_data = df.iloc[:-1].copy()
+        
+        horizons = {'1D': 1, '7D': 7, '14D': 14, '30D': 30}
+        results = {}
+        
+        for name, days in horizons.items():
+            target_return = (historical_data['Close'].shift(-days) - historical_data['Close']) / historical_data['Close']
+            
+            valid_idx = historical_data.index[:-days]
+            X = historical_data.loc[valid_idx, features]
+            y = target_return.loc[valid_idx]
+            
+            split_index = int(len(X) * 0.8)
+            X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
+            y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
+            
+            model = xgb.XGBRegressor(
+                objective='reg:squarederror', 
+                random_state=42, 
+                learning_rate=0.03, 
+                max_depth=4,
+                n_estimators=100
+            )
+            model.fit(X_train, y_train)
+            
+            test_preds = model.predict(X_test)
+            dir_accuracy = accuracy_score(y_test > 0, test_preds > 0)
+            avg_dollar_error = mean_absolute_error(y_test * latest_price, test_preds * latest_price)
+            
+            pred_return = model.predict(X_today)[0]
+            predicted_price = latest_price * (1 + pred_return)
+            dollar_change = predicted_price - latest_price
+            
+            results[name] = {
+                'predicted_price': predicted_price,
+                'dollar_change': dollar_change,
+                'percent_change': pred_return * 100,
+                'dir_accuracy': dir_accuracy,
+                'avg_dollar_error': avg_dollar_error
+            }
+            
+        return results, latest_price, df
+    except Exception:
         return None, None, None
-        
-    df = df[['Close', 'Volume']].copy()
-    
-    # Feature Engineering
-    df['Return'] = df['Close'].pct_change()
-    df['SMA_10'] = df['Close'].rolling(window=10).mean()
-    df['SMA_50'] = df['Close'].rolling(window=50).mean()
-    
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-    
-    df['SMA_20'] = df['Close'].rolling(window=20).mean()
-    df['STD_20'] = df['Close'].rolling(window=20).std()
-    df['BB_Upper'] = df['SMA_20'] + (df['STD_20'] * 2)
-    df['BB_Lower'] = df['SMA_20'] - (df['STD_20'] * 2)
-    df['BB_Position'] = (df['Close'] - df['BB_Lower']) / (df['BB_Upper'] - df['BB_Lower'])
-    
-    df['EMA_12'] = df['Close'].ewm(span=12, adjust=False).mean()
-    df['EMA_26'] = df['Close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = df['EMA_12'] - df['EMA_26']
-    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
-    
-    df['Volume_Change'] = df['Volume'].pct_change()
-    df.replace([np.inf, -np.inf], 0, inplace=True)
-    df = df.dropna() 
-    
-    if len(df) < 100:
-        return None, None, None 
-        
-    features = ['Return', 'SMA_10', 'SMA_50', 'RSI', 'BB_Position', 'MACD', 'MACD_Hist', 'Volume_Change']
-    
-    latest_price = df['Close'].iloc[-1]
-    X_today = df.iloc[[-1]][features]
-    historical_data = df.iloc[:-1].copy()
-    
-    horizons = {'1D': 1, '7D': 7, '14D': 14, '30D': 30}
-    results = {}
-    
-    for name, days in horizons.items():
-        # Target: Percentage price return over 'days'
-        target_return = (historical_data['Close'].shift(-days) - historical_data['Close']) / historical_data['Close']
-        
-        valid_idx = historical_data.index[:-days]
-        X = historical_data.loc[valid_idx, features]
-        y = target_return.loc[valid_idx]
-        
-        split_index = int(len(X) * 0.8)
-        X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
-        y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
-        
-        # Train XGBoost Regression Model for exact price forecasting
-        model = xgb.XGBRegressor(
-            objective='reg:squarederror', 
-            random_state=42, 
-            learning_rate=0.03, 
-            max_depth=4,
-            n_estimators=100
-        )
-        model.fit(X_train, y_train)
-        
-        # Backtest testing
-        test_preds = model.predict(X_test)
-        
-        # Calculate directional backtest accuracy
-        dir_accuracy = accuracy_score(y_test > 0, test_preds > 0)
-        
-        # Calculate average dollar error margin on testing set
-        avg_dollar_error = mean_absolute_error(y_test * latest_price, test_preds * latest_price)
-        
-        # Today's Prediction
-        pred_return = model.predict(X_today)[0]
-        predicted_price = latest_price * (1 + pred_return)
-        dollar_change = predicted_price - latest_price
-        
-        results[name] = {
-            'predicted_price': predicted_price,
-            'dollar_change': dollar_change,
-            'percent_change': pred_return * 100,
-            'dir_accuracy': dir_accuracy,
-            'avg_dollar_error': avg_dollar_error
-        }
-        
-    return results, latest_price, df
 
-# --- DASHBOARD UI ---
-st.title("📈 SafeBets Multi-Horizon Price Predictor")
-st.markdown("Generates **exact price targets** rounded to the nearest cent for 1, 7, 14, and 30 days out.")
+# --- DASHBOARD NAVIGATION ---
+st.title("📈 SafeBets Master Multi-Horizon Predictor")
 
-selected_asset = st.selectbox("Select Asset", list(asset_map.keys()))
-ticker = asset_map[selected_asset]
+tab1, tab2 = st.tabs(["📊 Master Table (All Assets)", "🔍 Single Asset Detailed View"])
 
-if st.button("Generate Exact Price Predictions"):
-    with st.spinner(f"Running regression algorithms for {selected_asset}..."):
-        results, price, df = get_exact_price_predictions(ticker)
+# --- TAB 1: ALL ASSETS AT ONCE ---
+with tab1:
+    st.subheader("Daily All-Assets Prediction Table")
+    st.markdown("Click below to train models and generate targets for all crypto, tech, chips, and commodities simultaneously.")
+    
+    if st.button("🚀 Generate All Market Predictions"):
+        master_rows = []
+        progress_bar = st.progress(0)
+        total_assets = len(asset_map)
         
-        if results is None:
-            st.error("Not enough historical data to generate predictions for this asset.")
-            st.stop()
+        for idx, (asset_name, ticker) in enumerate(asset_map.items()):
+            st.toast(f"Processing {asset_name}...", icon="⏳")
+            results, price, _ = get_exact_price_predictions(ticker)
             
-        st.divider()
-        st.metric("Current Price", f"${price:,.2f}")
+            if results is not None:
+                master_rows.append({
+                    "Asset": asset_name,
+                    "Current Price": f"${price:,.2f}",
+                    "1D Target": f"${results['1D']['predicted_price']:,.2f} ({results['1D']['percent_change']:+.2f}%)",
+                    "7D Target": f"${results['7D']['predicted_price']:,.2f} ({results['7D']['percent_change']:+.2f}%)",
+                    "14D Target": f"${results['14D']['predicted_price']:,.2f} ({results['14D']['percent_change']:+.2f}%)",
+                    "30D Target": f"${results['30D']['predicted_price']:,.2f} ({results['30D']['percent_change']:+.2f}%)",
+                })
+            
+            progress_bar.progress((idx + 1) / total_assets)
+            
+        st.success("All market predictions generated successfully!")
         
-        # Display 4 time horizons side-by-side
-        cols = st.columns(4)
-        horizons = ['1D', '7D', '14D', '30D']
-        
-        for i, col in enumerate(cols):
-            horizon = horizons[i]
-            data = results[horizon]
+        if master_rows:
+            summary_df = pd.DataFrame(master_rows)
+            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+# --- TAB 2: SINGLE ASSET DETAILED VIEW ---
+with tab2:
+    selected_asset = st.selectbox("Select Asset for Detailed View", list(asset_map.keys()))
+    ticker = asset_map[selected_asset]
+
+    if st.button("Generate Detailed Prediction"):
+        with st.spinner(f"Running detailed analysis for {selected_asset}..."):
+            results, price, df = get_exact_price_predictions(ticker)
             
-            target_p = data['predicted_price']
-            d_change = data['dollar_change']
-            p_change = data['percent_change']
-            
-            with col:
-                st.subheader(f"{horizon} Forecast")
-                # Main exact dollar figure rounded to nearest cent
-                st.metric(
-                    label="Target Price", 
-                    value=f"${target_p:,.2f}", 
-                    delta=f"{d_change:+.2f} ({p_change:+.2f}%)"
-                )
+            if results is None:
+                st.error("Not enough historical data available for this symbol.")
+                st.stop()
                 
-                st.caption(f"Directional Acc: {data['dir_accuracy'] * 100:.1f}%")
-                st.caption(f"Avg Margin of Error: ±${data['avg_dollar_error']:,.2f}")
-        
-        st.divider()
-        st.subheader(f"90-Day Price History ({selected_asset})")
-        st.line_chart(df['Close'].tail(90))
+            st.divider()
+            st.metric("Current Price", f"${price:,.2f}")
+            
+            cols = st.columns(4)
+            horizons = ['1D', '7D', '14D', '30D']
+            
+            for i, col in enumerate(cols):
+                horizon = horizons[i]
+                data = results[horizon]
+                
+                target_p = data['predicted_price']
+                d_change = data['dollar_change']
+                p_change = data['percent_change']
+                
+                with col:
+                    st.subheader(f"{horizon} Forecast")
+                    st.metric(
+                        label="Target Price", 
+                        value=f"${target_p:,.2f}", 
+                        delta=f"{d_change:+.2f} ({p_change:+.2f}%)"
+                    )
+                    st.caption(f"Directional Acc: {data['dir_accuracy'] * 100:.1f}%")
+                    st.caption(f"Avg Error: ±${data['avg_dollar_error']:,.2f}")
+            
+            st.divider()
+            st.subheader(f"90-Day Price History ({selected_asset})")
+            st.line_chart(df['Close'].tail(90))
