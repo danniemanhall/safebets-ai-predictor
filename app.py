@@ -99,14 +99,27 @@ asset_map = {
     "Chips - INTC": "INTC", "Chips - ARM": "ARM",
 
     # Commodities (4)
-    "Comm - GOLD": "GC=F", "Comm - SILVER": "SI=F", "Comm - WTI": "CL=F", "Comm - COPPER": "HG=F"
+    # Metals are SPOT, not futures. SafeBets prices these off Twelve Data, whose
+    # "Gold"/"Silver" are XAU/USD and XAG/USD spot. COMEX futures (GC=F, SI=F)
+    # carry a basis of roughly 0.3-0.4% over 30 days -- about half the 0.75%
+    # Bull's Eye band on GOLD -- so the futures contract is the wrong instrument.
+    #
+    # History note for the ledger: GOLD was quoted as "Gold (PAXG)" / symbol XAU /
+    # priceSource coinbase until ~13-14 Aug 2026, then migrated to plain Gold /
+    # twelvedata. Predictions from before that window were scored against a
+    # different asset and must not be pooled with later ones.
+    "Comm - GOLD": "XAUUSD=X", "Comm - SILVER": "XAGUSD=X",
+    "Comm - WTI": "CL=F", "Comm - COPPER": "HG=F"
 }
 
 # Assets where the Yahoo ticker may not match what SafeBets quotes.
 # SPCX in particular: SpaceX is not publicly traded, so SafeBets is quoting
 # some private/synthetic mark that Yahoo cannot possibly match. Any row that
 # fails validation here should be entered by hand from the SafeBets tile.
-UNVERIFIED_TICKERS = {"SPCX", "HYPE32196-USD", "SNDK"}
+# SPCX is the one to distrust: SpaceX is not publicly traded, so Twelve Data is
+# serving some private-market or pre-IPO valuation estimate under a stock-style
+# ticker. No Yahoo symbol can match that. Enter it by hand from the tile.
+UNVERIFIED_TICKERS = {"SPCX", "HYPE32196-USD", "XAUUSD=X", "XAGUSD=X", "CL=F", "HG=F"}
 
 # --- 3. BATCHED SENTIMENT ENGINE (ONE API CALL FOR ALL ASSETS) ---
 
@@ -1066,6 +1079,10 @@ THRESHOLDS = {
 # app ticker -> SafeBets symbol
 SYMBOL_MAP = {v: k.split(" - ")[-1] for k, v in asset_map.items()}
 
+# Different SafeBets services name the same asset differently: the catalog says
+# GOLD, the prediction records say XAU. Normalise so a ledger can join them.
+SYMBOL_ALIASES = {"XAU": "GOLD", "PAXG": "GOLD"}
+
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def empirical_deviations(ticker_symbol, days):
@@ -1244,6 +1261,130 @@ def conditional_ev(ticker_symbol, sb_symbol):
             'n': st_['n'],
         }
     return out
+
+
+# --- 8. CALIBRATION LEDGER ---
+#
+# The one form of learning available here. The model cannot learn WHERE prices
+# go -- the backtest settled that. But it can learn whether its own probability
+# estimates are honest. If a slot is predicted to hit 12% of the time and
+# actually hits 4%, the EV ranking is wrong and should be reordered on measured
+# data rather than theory.
+
+LEDGER_COLUMNS = [
+    'id', 'symbol', 'period', 'predictedPrice', 'actualPrice', 'startPrice',
+    'deviation', 'rewardTier', 'baseReward', 'multiplier', 'finalReward',
+    'streakBefore', 'streakAfter', 'priceSource', 'resolvedAt',
+]
+
+
+def parse_prediction_records(text):
+    """
+    Accept whatever the user pastes: a JSON array, one object, or several
+    objects one per line. Returns a DataFrame of flattened records.
+    """
+    text = text.strip()
+    if not text:
+        return pd.DataFrame(columns=LEDGER_COLUMNS)
+
+    records = []
+    try:
+        parsed = json.loads(text)
+        records = parsed if isinstance(parsed, list) else [parsed]
+    except json.JSONDecodeError:
+        # fall back to one JSON object per line, or concatenated objects
+        for chunk in re.findall(r'\{(?:[^{}]|\{[^{}]*\})*\}', text):
+            try:
+                obj = json.loads(chunk)
+                if isinstance(obj, dict) and 'predictedPrice' in obj:
+                    records.append(obj)
+            except json.JSONDecodeError:
+                continue
+
+    rows = []
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        market = r.get('market') or {}
+        period = r.get('period') or {}
+        symbol = market.get('symbol')
+        symbol = SYMBOL_ALIASES.get(symbol, symbol)
+        rows.append({
+            'id': r.get('id'),
+            'symbol': symbol,
+            'period': period.get('name'),
+            'predictedPrice': r.get('predictedPrice'),
+            'actualPrice': r.get('actualPrice'),
+            'startPrice': r.get('startPrice'),
+            'deviation': r.get('deviation'),
+            'rewardTier': r.get('rewardTier'),
+            'baseReward': r.get('baseReward'),
+            'multiplier': r.get('multiplier'),
+            'finalReward': r.get('finalReward'),
+            'streakBefore': r.get('streakBefore'),
+            'streakAfter': r.get('streakAfter'),
+            'priceSource': r.get('priceSource'),
+            'resolvedAt': r.get('resolvedAt') or r.get('completedAt'),
+        })
+
+    df = pd.DataFrame(rows, columns=LEDGER_COLUMNS)
+    if not df.empty:
+        df = df.dropna(subset=['symbol', 'period'])
+    return df
+
+
+def calibration_table(ledger):
+    """
+    Compare what the model predicted against what actually happened, per
+    asset and timeframe. This is the number that decides whether the EV
+    ranking can be trusted.
+    """
+    if ledger.empty:
+        return pd.DataFrame()
+
+    ticker_for = {v: k for k, v in SYMBOL_MAP.items()}
+    rows = []
+
+    for (symbol, period), grp in ledger.groupby(['symbol', 'period']):
+        n = len(grp)
+        obs_any = float(grp['rewardTier'].notna().mean())
+        obs_be = float((grp['rewardTier'] == 'BULLS_EYE').mean())
+        obs_reward = float(pd.to_numeric(grp['finalReward'], errors='coerce').fillna(0).mean())
+
+        pred_any = pred_be = pred_ev = np.nan
+        ticker = ticker_for.get(symbol)
+        if ticker:
+            model = ev_for_symbol(ticker, symbol)
+            if model and period in model:
+                pred_any = model[period]['p_any']
+                pred_be = model[period]['probs'].get('BULLS_EYE', 0.0)
+                pred_ev = model[period]['ev']
+
+        # Flag only when the sample is big enough for the gap to mean anything.
+        verdict = "need more data"
+        if n >= 20 and np.isfinite(pred_any):
+            ratio = obs_any / pred_any if pred_any > 0 else np.nan
+            if ratio < 0.6:
+                verdict = "🔴 model too optimistic"
+            elif ratio > 1.4:
+                verdict = "🟢 better than modelled"
+            else:
+                verdict = "⚪ roughly calibrated"
+
+        rows.append({
+            'Asset': symbol,
+            'Timeframe': period,
+            'n': n,
+            'Pred P(any)': f"{pred_any:.1%}" if np.isfinite(pred_any) else "n/a",
+            'Actual P(any)': f"{obs_any:.1%}",
+            'Pred P(BE)': f"{pred_be:.1%}" if np.isfinite(pred_be) else "n/a",
+            'Actual P(BE)': f"{obs_be:.1%}",
+            'Pred EV': f"{pred_ev:.1f}" if np.isfinite(pred_ev) else "n/a",
+            'Actual avg reward': f"{obs_reward:.1f}",
+            'Verdict': verdict,
+        })
+
+    return pd.DataFrame(rows).sort_values('n', ascending=False)
 
 # --- 5. DASHBOARD ---
 st.title("📈 SafeBets Multi-Horizon Predictor")
@@ -1505,3 +1646,87 @@ if st.button("🎯 Rank by today's conditions"):
                     "so skipping a slot on its say-so costs you expected value for "
                     "nothing. ✓ = 1.15x or better, ~ = 1.05-1.15x, ✗ = below 1.05x."
                 )
+
+st.markdown("---")
+st.subheader("Calibration ledger")
+st.caption(
+    "The only learning available here. The model cannot learn where prices go — "
+    "that was settled by backtest. It can learn whether its own probability "
+    "estimates are honest, and reorder the EV ranking on measured results."
+)
+
+if 'ledger' not in st.session_state:
+    st.session_state['ledger'] = pd.DataFrame(columns=LEDGER_COLUMNS)
+
+led_col1, led_col2 = st.columns(2)
+
+with led_col1:
+    restore = st.file_uploader(
+        "Restore a saved ledger (CSV)", type='csv', key='ledger_upload',
+        help="Streamlit's filesystem is wiped on restart, so the ledger lives in "
+             "a CSV you download and re-upload."
+    )
+    if restore is not None:
+        try:
+            loaded = pd.read_csv(restore)
+            st.session_state['ledger'] = loaded
+            st.success(f"Loaded {len(loaded)} records.")
+        except Exception as e:
+            st.error(f"Could not read that CSV: {e}")
+
+with led_col2:
+    if not st.session_state['ledger'].empty:
+        st.download_button(
+            "⬇️ Download ledger CSV",
+            st.session_state['ledger'].to_csv(index=False).encode(),
+            file_name="safebets_ledger.csv",
+            mime="text/csv",
+        )
+        st.caption(f"{len(st.session_state['ledger'])} records held.")
+
+pasted = st.text_area(
+    "Paste resolved prediction JSON",
+    height=140,
+    placeholder='Paste one or more records from GET /api/predictions/{id} — '
+                'a JSON array, a single object, or several objects one per line.',
+)
+
+if st.button("➕ Add to ledger"):
+    new = parse_prediction_records(pasted)
+    if new.empty:
+        st.warning("No valid prediction records found in that text.")
+    else:
+        combined = pd.concat([st.session_state['ledger'], new], ignore_index=True)
+        before = len(combined)
+        if 'id' in combined.columns:
+            combined = combined.drop_duplicates(subset=['id'], keep='last')
+        st.session_state['ledger'] = combined
+        dupes = before - len(combined)
+        st.success(
+            f"Added {len(new)} record(s)."
+            + (f" Skipped {dupes} already in the ledger." if dupes else "")
+        )
+
+ledger = st.session_state['ledger']
+if not ledger.empty:
+    st.markdown(f"**{len(ledger)} resolved predictions recorded.**")
+
+    mixed_gold = ledger[(ledger['symbol'] == 'GOLD') &
+                        (ledger['priceSource'] == 'coinbase')]
+    if not mixed_gold.empty:
+        st.warning(
+            f"{len(mixed_gold)} GOLD record(s) were priced off Coinbase (the old "
+            "PAXG-wrapped market), not Twelve Data spot. Those were scored against "
+            "a different asset — exclude them before reading GOLD's calibration."
+        )
+
+    cal = calibration_table(ledger)
+    if not cal.empty:
+        st.dataframe(cal, use_container_width=True, hide_index=True)
+        st.caption(
+            "Verdicts only appear once a slot has 20+ resolved predictions — below "
+            "that, the difference between predicted and actual is mostly noise. "
+            "🔴 means the model overstates that slot's hit rate and its EV ranking "
+            "should be discounted. Actual avg reward is the number to trust over "
+            "any theoretical EV figure."
+        )
