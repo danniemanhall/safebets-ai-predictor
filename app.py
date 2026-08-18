@@ -1386,6 +1386,150 @@ def calibration_table(ledger):
 
     return pd.DataFrame(rows).sort_values('n', ascending=False)
 
+
+# --- 9. ANCHOR OFFSET / FORWARD PRICE ENGINE ---
+#
+# Forward-pricing theory says the best estimate of a future spot price is not
+# today's spot but the forward: spot x (1 + (r - q) x T) for equities, or the
+# futures price for crypto and commodities. On a 30-day GOOGL prediction that
+# carry is roughly 0.25% against a 0.35% Bull's Eye band, so if the theory
+# holds it is worth most of a band.
+#
+# But an earlier test found that a historical-drift offset LOST to plain spot
+# on every asset. So this does not assume the theory: it measures the offset
+# that would actually have maximised band hit rate, validates it on data the
+# search never saw, and applies it only where it genuinely wins.
+
+OFFSET_GRID = np.round(np.arange(-0.010, 0.0205, 0.0005), 5)
+OFFSET_MIN_EDGE = 0.03      # out-of-sample EV must improve by 3% to adopt
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def theoretical_carry(ticker_symbol, days):
+    """
+    Textbook forward premium: (r - q) x T. Shown as a reference point against
+    the empirically optimal offset -- if the two agree, that is corroboration;
+    if the empirical optimum is zero while carry says otherwise, the theory is
+    not paying off on this asset.
+    """
+    try:
+        r = 0.0425
+        try:
+            tb = yf.Ticker("^IRX").history(period="5d")
+            if not tb.empty:
+                r = float(tb['Close'].iloc[-1]) / 100.0
+        except Exception:
+            pass
+
+        q = 0.0
+        try:
+            info = yf.Ticker(ticker_symbol).info
+            dy = info.get('dividendYield')
+            if dy:
+                q = float(dy) if float(dy) < 1 else float(dy) / 100.0
+        except Exception:
+            pass
+
+        return (r - q) * (days / 365.0)
+    except Exception:
+        return 0.0
+
+
+def _offset_ev(moves_pct, bands, payouts, offset):
+    """
+    Expected unicoins from placing the prediction `offset` above spot.
+
+    deviation = |P - A| / P, so with P = S(1+offset) and A = S(1+m), the
+    deviation is |offset - m| / (1 + offset).
+
+    NOTE this optimises EV, not any-tier hit rate, and that choice matters.
+    Because the deviation denominator is the PREDICTED price, the acceptance
+    window physically widens as the prediction rises: |offset - m| <=
+    d(1 + offset). Scoring on the widest band therefore rewards simply
+    predicting high, and a hit-rate search games that instead of finding real
+    drift -- on zero-drift test data it proposed +1.25%. EV is dominated by the
+    narrow, high-paying Bull's Eye band, where the widening is negligible, so
+    the objective tracks genuine drift rather than the formula's geometry.
+    """
+    dev = np.abs(offset - moves_pct / 100.0) / (1.0 + offset)
+    ev, prev = 0.0, 0.0
+    for d_pct, tier in sorted(bands):
+        cum = float(np.mean(dev <= d_pct / 100.0))
+        ev += (cum - prev) * payouts.get(tier, 0)
+        prev = cum
+    return ev
+
+
+def _band_hit(moves_pct, bands, offset):
+    """Any-tier hit rate — reported for context, never used as the objective."""
+    widest = max(b[0] for b in bands) / 100.0
+    dev = np.abs(offset - moves_pct / 100.0) / (1.0 + offset)
+    return float(np.mean(dev <= widest))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def optimal_anchor_offset(ticker_symbol, sb_symbol, period):
+    """
+    Walk-forward search for the best anchor offset.
+
+    The grid is searched on the first 60% of history and scored on the last
+    40%, which the search never touched. Reporting the in-sample optimum would
+    guarantee an apparent edge and mean nothing.
+    """
+    bands_all = THRESHOLDS.get(sb_symbol)
+    if not bands_all:
+        return None
+    days = PERIOD_DAYS.get(period)
+    if not days:
+        return None
+
+    bands = sorted((float(r['deviation']), r['tier'])
+                   for r in bands_all if r['periodName'] == period)
+    if not bands:
+        return None
+
+    try:
+        raw = yf.Ticker(ticker_symbol).history(period=HISTORY_PERIOD)
+        if raw.empty or len(raw) < days + 250:
+            return None
+        close = raw['Close']
+        moves = ((close.shift(-days) / close - 1.0) * 100.0).dropna().to_numpy()
+    except Exception:
+        return None
+
+    if len(moves) < 250:
+        return None
+
+    split = int(len(moves) * 0.6)
+    train, test = moves[:split], moves[split:]
+    if len(test) < 80:
+        return None
+
+    payouts = PAYOUTS.get(period, {})
+    scores = [(_offset_ev(train, bands, payouts, o), o) for o in OFFSET_GRID]
+    best_in_sample = max(scores)[1]
+
+    oos_spot_ev = _offset_ev(test, bands, payouts, 0.0)
+    oos_offset_ev = _offset_ev(test, bands, payouts, best_in_sample)
+
+    carry = theoretical_carry(ticker_symbol, days)
+    # Require a relative EV gain, so the bar scales with the horizon's payouts.
+    rel_edge = (oos_offset_ev / oos_spot_ev - 1.0) if oos_spot_ev > 0 else 0.0
+    use = rel_edge >= OFFSET_MIN_EDGE and abs(best_in_sample) > 1e-9
+
+    return {
+        'offset': float(best_in_sample),
+        'applied': float(best_in_sample) if use else 0.0,
+        'oos_spot_ev': oos_spot_ev,
+        'oos_offset_ev': oos_offset_ev,
+        'rel_edge': rel_edge,
+        'oos_spot': _band_hit(test, bands, 0.0),
+        'oos_offset': _band_hit(test, bands, best_in_sample),
+        'carry': carry,
+        'use': use,
+        'n_test': len(test),
+    }
+
 # --- 5. DASHBOARD ---
 st.title("📈 SafeBets Multi-Horizon Predictor")
 st.caption(
@@ -1729,4 +1873,60 @@ if not ledger.empty:
             "🔴 means the model overstates that slot's hit rate and its EV ranking "
             "should be discounted. Actual avg reward is the number to trust over "
             "any theoretical EV figure."
+        )
+
+st.markdown("---")
+st.subheader("Forward price test")
+st.caption(
+    "Theory says the best estimate of a future price is the forward, not spot. "
+    "This measures the offset that would actually have maximised band hit rate, "
+    "scores it on data the search never saw, and applies it only where it wins."
+)
+
+offset_period = st.selectbox(
+    "Horizon to test", list(PERIOD_DAYS.keys()), index=3, key="offset_period"
+)
+
+if st.button("📐 Test forward offsets"):
+    rows = []
+    bar = st.progress(0)
+    covered = [(n, t) for n, t in asset_map.items() if SYMBOL_MAP.get(t) in THRESHOLDS]
+
+    for i, (asset_name, ticker) in enumerate(covered):
+        res = optimal_anchor_offset(ticker, SYMBOL_MAP.get(ticker), offset_period)
+        if res:
+            rows.append({
+                "Asset": asset_name,
+                "Best offset": f"{res['offset']*100:+.2f}%",
+                "Carry says": f"{res['carry']*100:+.2f}%",
+                "EV @ spot": f"{res['oos_spot_ev']:.1f}",
+                "EV @ offset": f"{res['oos_offset_ev']:.1f}",
+                "Edge": f"{res['rel_edge']*100:+.1f}%",
+                "Verdict": "🟢 use offset" if res['use'] else "⚪ keep spot",
+                "n": res['n_test'],
+            })
+        bar.progress((i + 1) / max(len(covered), 1))
+
+    if rows:
+        df = pd.DataFrame(rows)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        wins = sum(1 for r in rows if "use offset" in r["Verdict"])
+        st.info(
+            f"**{wins} of {len(rows)}** assets show an out-of-sample gain from "
+            f"shifting the anchor at {offset_period}. Where the verdict is "
+            "*keep spot*, the offset that looked best historically did not hold "
+            "up on fresh data — that is the forward-price theory failing to pay "
+            "off on that asset, not a bug."
+        )
+        st.caption(
+            "**Best offset** is the shift that maximised expected value on the first 60% "
+            "of history. **Carry says** is the textbook forward premium (r − q) × T "
+            "for comparison — if the two roughly agree, the theory is corroborated. "
+            "**EV @ spot** and **EV @ offset** are both measured on the final 40%, "
+            "which the search never touched. An offset is only adopted if it beats "
+            "spot there by at least 3%. EV is the objective rather than hit rate "
+            "because the scoring formula divides by your predicted price, so a "
+            "hit-rate search would just learn to predict high and widen its own "
+            "acceptance window."
         )
