@@ -541,6 +541,247 @@ def get_predictions(ticker_symbol, shrink_enabled=True, folds=DEFAULT_FOLDS):
         return None, None
 
 
+
+# --- 6. EXPECTED VALUE / ALLOCATION ENGINE ---
+#
+# The scoring is not continuous percentage error -- it is nested deviation
+# bands with fixed payouts per timeframe. Bull's Eye probability turns out to
+# be roughly constant across timeframes (the bands are volatility-calibrated),
+# while payouts scale 50x from 24H to 30D. So which WINDOW you spend a
+# prediction on matters far more than any forecasting edge.
+
+PAYOUTS = {
+    'HOURS_24': {'BULLS_EYE': 20,   'EXCELLENT': 10,  'GREAT': 5,   'GOOD': 1},
+    'DAYS_7':   {'BULLS_EYE': 150,  'EXCELLENT': 50,  'GREAT': 20,  'GOOD': 10},
+    'DAYS_14':  {'BULLS_EYE': 400,  'EXCELLENT': 150, 'GREAT': 50,  'GOOD': 20},
+    'DAYS_30':  {'BULLS_EYE': 1000, 'EXCELLENT': 400, 'GREAT': 150, 'GOOD': 50},
+}
+PERIOD_DAYS = {'HOURS_24': 1, 'DAYS_7': 7, 'DAYS_14': 14, 'DAYS_30': 30}
+TIER_ORDER = ['BULLS_EYE', 'EXCELLENT', 'GREAT', 'GOOD']
+
+# Paste each symbol's /api/.../accuracy-thresholds response here to include it.
+# Only symbols present below appear in the EV table.
+THRESHOLDS = {
+    "BTC": [
+        {"tier": "BULLS_EYE", "deviation": 0.15, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.35, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 0.70, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 1.15, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.60, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 1.25, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 2.00, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 3.10, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.90, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 1.85, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 2.90, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 4.35, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 1.30, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 2.75, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 4.35, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 6.40, "periodName": "DAYS_30"},
+    ],
+    "GOOGL": [
+        {"tier": "BULLS_EYE", "deviation": 0.05, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.15, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 0.35, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 0.60, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.15, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 0.40, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 0.80, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 1.40, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.25, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 0.55, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 1.15, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 1.95, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 0.35, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 0.80, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 1.70, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 2.85, "periodName": "DAYS_30"},
+    ],
+}
+
+# app ticker -> SafeBets symbol
+SYMBOL_MAP = {v: k.split(" - ")[-1] for k, v in asset_map.items()}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def empirical_deviations(ticker_symbol, days):
+    """
+    Actual historical |percentage move| over `days`, from this asset's own
+    history. Used instead of a normal approximation because return
+    distributions are leptokurtic: more mass near zero AND fatter tails than
+    a Gaussian, which shifts tight-band hit rates meaningfully.
+    """
+    try:
+        raw = yf.Ticker(ticker_symbol).history(period=HISTORY_PERIOD)
+        if raw.empty or len(raw) < days + 60:
+            return None
+        close = raw['Close']
+        moves = (close.shift(-days) / close - 1.0).dropna().abs() * 100.0
+        return moves.to_numpy()
+    except Exception:
+        return None
+
+
+def ev_for_symbol(ticker_symbol, sb_symbol):
+    """Expected unicoins per prediction, per timeframe, using empirical bands."""
+    bands = THRESHOLDS.get(sb_symbol)
+    if not bands:
+        return None
+
+    by_period = {}
+    for row in bands:
+        by_period.setdefault(row['periodName'], []).append(
+            (float(row['deviation']), row['tier'])
+        )
+
+    out = {}
+    for period, days in PERIOD_DAYS.items():
+        if period not in by_period or period not in PAYOUTS:
+            continue
+        moves = empirical_deviations(ticker_symbol, days)
+        if moves is None or len(moves) < 100:
+            continue
+
+        ordered = sorted(by_period[period])
+        ev, prev_cum, tier_probs = 0.0, 0.0, {}
+        for dev, tier in ordered:
+            cum = float(np.mean(moves <= dev))
+            excl = max(0.0, cum - prev_cum)
+            ev += excl * PAYOUTS[period].get(tier, 0)
+            tier_probs[tier] = excl
+            prev_cum = cum
+
+        out[period] = {
+            'ev': ev,
+            'p_any': prev_cum,
+            'probs': tier_probs,
+            'n': len(moves),
+        }
+    return out
+
+
+# --- 7. CONDITIONAL VOLATILITY ENGINE ---
+#
+# Under band scoring, P(hit) is roughly band_width x density_at_prediction,
+# which scales as 1/sigma. Direction is unforecastable (the backtest above
+# settled that), but volatility is not -- it clusters. So the edge is not
+# predicting where price goes; it is predicting how far it travels, and
+# spending predictions only when the answer is "not far".
+
+VOL_REVERSION_DAYS = 20.0
+
+
+def forecast_vol(log_ret, days):
+    """
+    Forecast the h-day return sigma, as a series aligned to each date.
+
+    Blends a fast EWMA estimate of current conditions against the long-run
+    level, weighting toward the long run as the horizon extends, because
+    volatility mean-reverts. Uses only trailing data at every point, so it is
+    safe to evaluate out-of-sample.
+    """
+    short = log_ret.ewm(halflife=10, min_periods=20).std()
+    long = log_ret.rolling(252, min_periods=60).std()
+    w = float(np.exp(-days / VOL_REVERSION_DAYS))
+    daily = np.sqrt(w * short**2 + (1 - w) * long**2)
+    return daily * np.sqrt(days)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def conditional_vol_state(ticker_symbol):
+    """
+    Returns today's forecast sigma per horizon, its historical percentile, and
+    an out-of-sample check that low-forecast-vol days really do hit more often.
+    """
+    try:
+        raw = yf.Ticker(ticker_symbol).history(period=HISTORY_PERIOD)
+        if raw.empty or len(raw) < 400:
+            return None
+
+        close = raw['Close']
+        log_ret = np.log(close).diff()
+        out = {}
+
+        for period, days in PERIOD_DAYS.items():
+            fvol = forecast_vol(log_ret, days)
+            realised = (np.log(close).shift(-days) - np.log(close)).abs()
+
+            frame = pd.DataFrame({'fvol': fvol, 'realised': realised}).dropna()
+            if len(frame) < 200:
+                continue
+
+            today_vol = float(fvol.dropna().iloc[-1])
+            pct = float((fvol.dropna() < today_vol).mean())
+
+            # Standardised residuals: divide each realised move by the vol that
+            # was forecast for it. Rescaling these by today's forecast keeps the
+            # fat tails while conditioning on the current regime.
+            z = (frame['realised'] / frame['fvol']).to_numpy()
+
+            # Out-of-sample check: does a low forecast actually predict a small
+            # move? Compare realised moves in the calmest vs busiest tercile.
+            q_lo, q_hi = frame['fvol'].quantile([0.33, 0.67])
+            calm = frame.loc[frame['fvol'] <= q_lo, 'realised'].mean()
+            rough = frame.loc[frame['fvol'] >= q_hi, 'realised'].mean()
+            ratio = float(rough / calm) if calm > 0 else np.nan
+
+            out[period] = {
+                'sigma': today_vol,
+                'percentile': pct,
+                'z': z,
+                'calm_move': float(calm) * 100,
+                'rough_move': float(rough) * 100,
+                'ratio': ratio,
+                'n': len(frame),
+            }
+        return out
+    except Exception:
+        return None
+
+
+def conditional_ev(ticker_symbol, sb_symbol):
+    """Expected unicoins per prediction given TODAY's volatility regime."""
+    bands = THRESHOLDS.get(sb_symbol)
+    state = conditional_vol_state(ticker_symbol)
+    if not bands or not state:
+        return None
+
+    by_period = {}
+    for row in bands:
+        by_period.setdefault(row['periodName'], []).append(
+            (float(row['deviation']), row['tier'])
+        )
+
+    out = {}
+    for period, days in PERIOD_DAYS.items():
+        if period not in by_period or period not in state or period not in PAYOUTS:
+            continue
+
+        st_ = state[period]
+        # Rescale the standardised move distribution to today's forecast vol.
+        moves = st_['z'] * st_['sigma'] * 100.0
+
+        ordered = sorted(by_period[period])
+        ev, prev, probs = 0.0, 0.0, {}
+        for dev, tier in ordered:
+            cum = float(np.mean(moves <= dev))
+            excl = max(0.0, cum - prev)
+            ev += excl * PAYOUTS[period].get(tier, 0)
+            probs[tier] = excl
+            prev = cum
+
+        out[period] = {
+            'ev': ev,
+            'p_any': prev,
+            'probs': probs,
+            'vol_pct': st_['percentile'],
+            'sigma': st_['sigma'] * 100,
+            'ratio': st_['ratio'],
+            'n': st_['n'],
+        }
+    return out
+
 # --- 5. DASHBOARD ---
 st.title("📈 SafeBets Multi-Horizon Predictor")
 st.caption(
@@ -642,3 +883,127 @@ if st.button("🚀 Run All-Assets Analysis"):
             "the volatility-drag effect being picked up, and it is the most "
             "likely place to find a real edge."
         )
+
+st.markdown("---")
+st.subheader("Where to spend your predictions")
+st.caption(
+    "Expected unicoins per prediction, using each asset's own historical move "
+    "distribution against the platform's deviation bands. Only symbols with "
+    "thresholds pasted into THRESHOLDS appear here."
+)
+
+if st.button("💰 Rank timeframes by expected value"):
+    ev_rows = []
+    bar = st.progress(0)
+    covered = [(n, t) for n, t in asset_map.items() if SYMBOL_MAP.get(t) in THRESHOLDS]
+
+    if not covered:
+        st.warning("No symbols have thresholds configured. Paste accuracy-thresholds JSON into THRESHOLDS.")
+    else:
+        for i, (asset_name, ticker) in enumerate(covered):
+            res = ev_for_symbol(ticker, SYMBOL_MAP.get(ticker))
+            if res:
+                for period, d in res.items():
+                    ev_rows.append({
+                        "Asset": asset_name,
+                        "Timeframe": period,
+                        "EV (ú)": round(d['ev'], 1),
+                        "P(any tier)": f"{d['p_any']:.1%}",
+                        "P(Bull's Eye)": f"{d['probs'].get('BULLS_EYE', 0):.1%}",
+                        "Samples": d['n'],
+                    })
+            bar.progress((i + 1) / len(covered))
+
+        if ev_rows:
+            ev_df = pd.DataFrame(ev_rows).sort_values("EV (ú)", ascending=False)
+            st.dataframe(ev_df, use_container_width=True, hide_index=True)
+
+            best = ev_df.iloc[0]
+            worst = ev_df.iloc[-1]
+            ratio = best["EV (ú)"] / worst["EV (ú)"] if worst["EV (ú)"] > 0 else float('inf')
+            st.info(
+                f"Best: **{best['Asset']} / {best['Timeframe']}** at {best['EV (ú)']} ú per "
+                f"prediction. Worst: **{worst['Asset']} / {worst['Timeframe']}** at "
+                f"{worst['EV (ú)']} ú — a {ratio:.0f}x difference for the same one-unicoin "
+                "stake. Spend your daily windows top-down this list."
+            )
+            st.caption(
+                "Probabilities come from overlapping historical windows, so samples "
+                "are autocorrelated: treat these as well-grounded estimates, not "
+                "precise odds. They also assume you submit the current price, which "
+                "the backtest above showed beats every model tested."
+            )
+
+st.markdown("---")
+st.subheader("Submit today, or wait?")
+st.caption(
+    "Hit probability scales as 1/sigma, so the same prediction is worth two to "
+    "three times as much in calm conditions as in turbulent ones. This ranks "
+    "every asset and timeframe by expected value GIVEN today's volatility."
+)
+
+if st.button("🎯 Rank by today's conditions"):
+    rows = []
+    bar = st.progress(0)
+    covered = [(n, t) for n, t in asset_map.items() if SYMBOL_MAP.get(t) in THRESHOLDS]
+
+    if not covered:
+        st.warning(
+            "No symbols configured. Paste each asset's accuracy-thresholds "
+            "JSON into the THRESHOLDS dict near the top of this file."
+        )
+    else:
+        for i, (asset_name, ticker) in enumerate(covered):
+            res = conditional_ev(ticker, SYMBOL_MAP.get(ticker))
+            if res:
+                for period, d in res.items():
+                    if d['vol_pct'] < 0.33:
+                        signal = "🟢 calm — submit"
+                    elif d['vol_pct'] < 0.67:
+                        signal = "⚪ normal"
+                    else:
+                        signal = "🔴 turbulent — wait"
+                    rows.append({
+                        "Asset": asset_name,
+                        "Timeframe": period,
+                        "EV now (ú)": round(d['ev'], 1),
+                        "Signal": signal,
+                        "Vol pct": f"{d['vol_pct']:.0%}",
+                        "Fcst σ": f"{d['sigma']:.2f}%",
+                        "P(any tier)": f"{d['p_any']:.1%}",
+                        "P(Bull's Eye)": f"{d['probs'].get('BULLS_EYE', 0):.1%}",
+                    })
+            bar.progress((i + 1) / len(covered))
+
+        if rows:
+            df = pd.DataFrame(rows).sort_values("EV now (ú)", ascending=False)
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
+            calm = df[df["Signal"].str.contains("calm")]
+            st.info(
+                f"**{len(calm)} of {len(df)}** asset/timeframe slots are in the calmest "
+                "third of their own history right now. Those are where a prediction is "
+                "worth most today. Slots marked turbulent will be worth more later — "
+                "the window reopens daily, so skipping one costs nothing."
+            )
+
+            # Show whether the vol forecast actually works on this data.
+            checks = []
+            for asset_name, ticker in covered:
+                stt = conditional_vol_state(ticker)
+                if stt and 'DAYS_30' in stt:
+                    checks.append((asset_name, stt['DAYS_30']['calm_move'],
+                                   stt['DAYS_30']['rough_move'], stt['DAYS_30']['ratio']))
+            if checks:
+                st.markdown("**Does the volatility forecast actually work?** "
+                            "Average realised 30-day move on days the model called calm "
+                            "versus turbulent, out of sample:")
+                st.dataframe(pd.DataFrame(
+                    [{"Asset": a, "Calm days": f"{c:.1f}%", "Turbulent days": f"{r:.1f}%",
+                      "Ratio": f"{ratio:.2f}x"} for a, c, r, ratio in checks]
+                ), use_container_width=True, hide_index=True)
+                st.caption(
+                    "A ratio meaningfully above 1.0 means the forecast separates calm "
+                    "from turbulent periods, and the timing edge is real. Near 1.0 means "
+                    "it does not, and you should ignore the signal column."
+                )
