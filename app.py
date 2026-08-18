@@ -84,14 +84,29 @@ use_live = st.sidebar.checkbox(
 
 # --- 2. ASSET MAP ---
 asset_map = {
+    # Crypto (7)
     "Crypto - BTC": "BTC-USD", "Crypto - ETH": "ETH-USD", "Crypto - SOL": "SOL-USD",
     "Crypto - DOGE": "DOGE-USD", "Crypto - AVAX": "AVAX-USD", "Crypto - LINK": "LINK-USD",
+    "Crypto - HYPE": "HYPE32196-USD",
+
+    # Big Tech (9)
     "Tech - NVDA": "NVDA", "Tech - TSLA": "TSLA", "Tech - AAPL": "AAPL", "Tech - MSFT": "MSFT",
     "Tech - AMZN": "AMZN", "Tech - META": "META", "Tech - GOOGL": "GOOGL", "Tech - NFLX": "NFLX",
-    "Chips - AMD": "AMD", "Chips - MU": "MU", "Chips - AVGO": "AVGO",
+    "Tech - SPCX": "SPCX",
+
+    # AI Chips (6)
+    "Chips - AMD": "AMD", "Chips - MU": "MU", "Chips - SNDK": "SNDK", "Chips - AVGO": "AVGO",
     "Chips - INTC": "INTC", "Chips - ARM": "ARM",
+
+    # Commodities (4)
     "Comm - GOLD": "GC=F", "Comm - SILVER": "SI=F", "Comm - WTI": "CL=F", "Comm - COPPER": "HG=F"
 }
+
+# Assets where the Yahoo ticker may not match what SafeBets quotes.
+# SPCX in particular: SpaceX is not publicly traded, so SafeBets is quoting
+# some private/synthetic mark that Yahoo cannot possibly match. Any row that
+# fails validation here should be entered by hand from the SafeBets tile.
+UNVERIFIED_TICKERS = {"SPCX", "HYPE32196-USD", "SNDK"}
 
 # --- 3. BATCHED SENTIMENT ENGINE (ONE API CALL FOR ALL ASSETS) ---
 
@@ -562,41 +577,489 @@ TIER_ORDER = ['BULLS_EYE', 'EXCELLENT', 'GREAT', 'GOOD']
 # Paste each symbol's /api/.../accuracy-thresholds response here to include it.
 # Only symbols present below appear in the EV table.
 THRESHOLDS = {
+    "AAPL": [
+        {"tier": "BULLS_EYE", "deviation": 0.05, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.15, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 0.3, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 0.55, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.15, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 0.35, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 0.7, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 1.2, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.2, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 0.5, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 1.0, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 1.7, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 0.3, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 0.7, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 1.45, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 2.5, "periodName": "DAYS_30"},
+    ],
+    "AMD": [
+        {"tier": "BULLS_EYE", "deviation": 0.18, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.42, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 0.9, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 1.45, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.38, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 0.9, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 1.95, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 3.3, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.52, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 1.25, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 2.75, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 4.65, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 0.8, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 1.9, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 4.0, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 6.8, "periodName": "DAYS_30"},
+    ],
+    "AMZN": [
+        {"tier": "BULLS_EYE", "deviation": 0.05, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.15, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 0.35, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 0.6, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.15, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 0.4, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 0.85, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 1.4, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.25, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 0.55, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 1.2, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 1.95, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 0.35, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 0.8, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 1.7, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 2.85, "periodName": "DAYS_30"},
+    ],
+    "ARM": [
+        {"tier": "BULLS_EYE", "deviation": 0.2, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.48, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 1.05, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 1.8, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.45, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 1.05, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 2.3, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 3.9, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.65, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 1.45, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 3.25, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 5.5, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 0.9, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 2.1, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 4.5, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 7.65, "periodName": "DAYS_30"},
+    ],
+    "AVAX": [
+        {"tier": "BULLS_EYE", "deviation": 0.5, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 1.25, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 2.25, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 3.5, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 1.4, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 3.25, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 5.75, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 9.25, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 2.0, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 4.5, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 8.0, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 13.0, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 2.9, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 6.75, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 12.0, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 19.0, "periodName": "DAYS_30"},
+    ],
+    "AVGO": [
+        {"tier": "BULLS_EYE", "deviation": 0.08, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.2, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 0.5, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 0.85, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.2, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 0.48, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 1.05, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 1.8, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.28, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 0.68, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 1.5, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 2.55, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 0.44, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 1.0, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 2.1, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 3.6, "periodName": "DAYS_30"},
+    ],
     "BTC": [
+        {"tier": "BULLS_EYE", "deviation": 0.34, "periodName": "MINUTES_2"},
+        {"tier": "EXCELLENT", "deviation": 0.69, "periodName": "MINUTES_2"},
+        {"tier": "GREAT", "deviation": 1.43, "periodName": "MINUTES_2"},
+        {"tier": "GOOD", "deviation": 2.54, "periodName": "MINUTES_2"},
         {"tier": "BULLS_EYE", "deviation": 0.15, "periodName": "HOURS_24"},
         {"tier": "EXCELLENT", "deviation": 0.35, "periodName": "HOURS_24"},
-        {"tier": "GREAT", "deviation": 0.70, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 0.7, "periodName": "HOURS_24"},
         {"tier": "GOOD", "deviation": 1.15, "periodName": "HOURS_24"},
-        {"tier": "BULLS_EYE", "deviation": 0.60, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.6, "periodName": "DAYS_7"},
         {"tier": "EXCELLENT", "deviation": 1.25, "periodName": "DAYS_7"},
-        {"tier": "GREAT", "deviation": 2.00, "periodName": "DAYS_7"},
-        {"tier": "GOOD", "deviation": 3.10, "periodName": "DAYS_7"},
-        {"tier": "BULLS_EYE", "deviation": 0.90, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 2.0, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 3.1, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.9, "periodName": "DAYS_14"},
         {"tier": "EXCELLENT", "deviation": 1.85, "periodName": "DAYS_14"},
-        {"tier": "GREAT", "deviation": 2.90, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 2.9, "periodName": "DAYS_14"},
         {"tier": "GOOD", "deviation": 4.35, "periodName": "DAYS_14"},
-        {"tier": "BULLS_EYE", "deviation": 1.30, "periodName": "DAYS_30"},
+        {"tier": "BULLS_EYE", "deviation": 1.3, "periodName": "DAYS_30"},
         {"tier": "EXCELLENT", "deviation": 2.75, "periodName": "DAYS_30"},
         {"tier": "GREAT", "deviation": 4.35, "periodName": "DAYS_30"},
-        {"tier": "GOOD", "deviation": 6.40, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 6.4, "periodName": "DAYS_30"},
+    ],
+    "COPPER": [
+        {"tier": "BULLS_EYE", "deviation": 0.3, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.65, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 1.1, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 1.8, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.6, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 1.4, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 2.5, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 4.0, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.8, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 1.9, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 3.4, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 5.5, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 1.2, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 2.8, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 5.1, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 8.2, "periodName": "DAYS_30"},
+    ],
+    "DOGE": [
+        {"tier": "BULLS_EYE", "deviation": 0.62, "periodName": "MINUTES_2"},
+        {"tier": "EXCELLENT", "deviation": 1.25, "periodName": "MINUTES_2"},
+        {"tier": "GREAT", "deviation": 2.59, "periodName": "MINUTES_2"},
+        {"tier": "GOOD", "deviation": 4.61, "periodName": "MINUTES_2"},
+        {"tier": "BULLS_EYE", "deviation": 0.2, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.4, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 0.85, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 1.35, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.8, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 1.55, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 2.5, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 3.75, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 1.1, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 2.15, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 3.55, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 5.25, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 1.65, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 3.3, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 5.2, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 7.6, "periodName": "DAYS_30"},
+    ],
+    "ETH": [
+        {"tier": "BULLS_EYE", "deviation": 0.38, "periodName": "MINUTES_2"},
+        {"tier": "EXCELLENT", "deviation": 0.77, "periodName": "MINUTES_2"},
+        {"tier": "GREAT", "deviation": 1.59, "periodName": "MINUTES_2"},
+        {"tier": "GOOD", "deviation": 2.84, "periodName": "MINUTES_2"},
+        {"tier": "BULLS_EYE", "deviation": 0.2, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.45, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 0.9, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 1.45, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.75, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 1.55, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 2.75, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 4.2, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 1.15, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 2.35, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 3.85, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 5.85, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 1.65, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 3.4, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 5.6, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 8.5, "periodName": "DAYS_30"},
+    ],
+    "GOLD": [
+        {"tier": "BULLS_EYE", "deviation": 0.15, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.35, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 0.6, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 0.9, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.35, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 0.75, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 1.3, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 2.0, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.5, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 1.05, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 1.85, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 2.85, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 0.75, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 1.5, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 2.7, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 4.2, "periodName": "DAYS_30"},
     ],
     "GOOGL": [
         {"tier": "BULLS_EYE", "deviation": 0.05, "periodName": "HOURS_24"},
         {"tier": "EXCELLENT", "deviation": 0.15, "periodName": "HOURS_24"},
         {"tier": "GREAT", "deviation": 0.35, "periodName": "HOURS_24"},
-        {"tier": "GOOD", "deviation": 0.60, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 0.6, "periodName": "HOURS_24"},
         {"tier": "BULLS_EYE", "deviation": 0.15, "periodName": "DAYS_7"},
-        {"tier": "EXCELLENT", "deviation": 0.40, "periodName": "DAYS_7"},
-        {"tier": "GREAT", "deviation": 0.80, "periodName": "DAYS_7"},
-        {"tier": "GOOD", "deviation": 1.40, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 0.4, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 0.8, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 1.4, "periodName": "DAYS_7"},
         {"tier": "BULLS_EYE", "deviation": 0.25, "periodName": "DAYS_14"},
         {"tier": "EXCELLENT", "deviation": 0.55, "periodName": "DAYS_14"},
         {"tier": "GREAT", "deviation": 1.15, "periodName": "DAYS_14"},
         {"tier": "GOOD", "deviation": 1.95, "periodName": "DAYS_14"},
         {"tier": "BULLS_EYE", "deviation": 0.35, "periodName": "DAYS_30"},
-        {"tier": "EXCELLENT", "deviation": 0.80, "periodName": "DAYS_30"},
-        {"tier": "GREAT", "deviation": 1.70, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 0.8, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 1.7, "periodName": "DAYS_30"},
         {"tier": "GOOD", "deviation": 2.85, "periodName": "DAYS_30"},
+    ],
+    "HYPE": [
+        {"tier": "BULLS_EYE", "deviation": 0.25, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.55, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 1.05, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 1.75, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.9, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 1.8, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 3.05, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 4.7, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 1.3, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 2.6, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 4.35, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 6.7, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 2.0, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 4.0, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 6.65, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 9.75, "periodName": "DAYS_30"},
+    ],
+    "INTC": [
+        {"tier": "BULLS_EYE", "deviation": 0.16, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.4, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 0.85, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 1.4, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.35, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 0.88, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 1.85, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 3.15, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.5, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 1.25, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 2.65, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 4.45, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 0.75, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 1.75, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 3.75, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 6.3, "periodName": "DAYS_30"},
+    ],
+    "LINK": [
+        {"tier": "BULLS_EYE", "deviation": 0.5, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 1.15, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 2.1, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 3.3, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 1.3, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 3.0, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 5.5, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 8.75, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 1.85, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 4.3, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 7.7, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 12.3, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 2.7, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 6.25, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 11.25, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 18.0, "periodName": "DAYS_30"},
+    ],
+    "META": [
+        {"tier": "BULLS_EYE", "deviation": 0.1, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.25, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 0.55, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 0.9, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.25, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 0.55, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 1.2, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 2.0, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.35, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 0.75, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 1.7, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 2.8, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 0.5, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 1.1, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 2.4, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 4.05, "periodName": "DAYS_30"},
+    ],
+    "MSFT": [
+        {"tier": "BULLS_EYE", "deviation": 0.1, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.2, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 0.4, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 0.7, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.2, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 0.45, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 0.9, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 1.55, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.3, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 0.65, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 1.3, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 2.2, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 0.4, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 0.9, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 1.9, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 3.2, "periodName": "DAYS_30"},
+    ],
+    "MU": [
+        {"tier": "BULLS_EYE", "deviation": 0.2, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.45, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 0.95, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 1.6, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.4, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 0.95, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 2.05, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 3.5, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.55, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 1.35, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 2.9, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 4.95, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 0.8, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 1.95, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 4.15, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 7.0, "periodName": "DAYS_30"},
+    ],
+    "NFLX": [
+        {"tier": "BULLS_EYE", "deviation": 0.1, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.2, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 0.45, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 0.75, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.2, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 0.5, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 1.0, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 1.7, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.3, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 0.7, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 1.45, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 2.45, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 0.4, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 0.95, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 2.1, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 3.55, "periodName": "DAYS_30"},
+    ],
+    "NVDA": [
+        {"tier": "BULLS_EYE", "deviation": 0.12, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.25, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 0.55, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 0.9, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.25, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 0.6, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 1.2, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 2.0, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.35, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 0.85, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 1.7, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 2.85, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 0.5, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 1.15, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 2.45, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 4.1, "periodName": "DAYS_30"},
+    ],
+    "SILVER": [
+        {"tier": "BULLS_EYE", "deviation": 0.3, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.6, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 1.0, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 1.35, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.65, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 1.35, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 2.2, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 3.0, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.9, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 1.9, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 3.1, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 4.2, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 1.3, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 2.8, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 4.5, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 6.1, "periodName": "DAYS_30"},
+    ],
+    "SNDK": [
+        {"tier": "BULLS_EYE", "deviation": 0.2, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.48, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 1.05, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 1.75, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.45, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 1.05, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 2.25, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 3.8, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.65, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 1.45, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 3.15, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 5.35, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 0.9, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 2.05, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 4.45, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 7.5, "periodName": "DAYS_30"},
+    ],
+    "SOL": [
+        {"tier": "BULLS_EYE", "deviation": 0.43, "periodName": "MINUTES_2"},
+        {"tier": "EXCELLENT", "deviation": 0.86, "periodName": "MINUTES_2"},
+        {"tier": "GREAT", "deviation": 1.78, "periodName": "MINUTES_2"},
+        {"tier": "GOOD", "deviation": 3.18, "periodName": "MINUTES_2"},
+        {"tier": "BULLS_EYE", "deviation": 0.15, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.4, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 0.8, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 1.25, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.7, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 1.4, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 2.3, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 3.55, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 1.0, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 2.0, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 3.35, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 4.95, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 1.45, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 2.95, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 4.8, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 7.1, "periodName": "DAYS_30"},
+    ],
+    "SPCX": [
+        {"tier": "BULLS_EYE", "deviation": 0.2, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.5, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 1.0, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 1.6, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.45, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 1.1, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 2.25, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 3.6, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.65, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 1.6, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 3.15, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 5.0, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 0.9, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 2.25, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 4.5, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 7.25, "periodName": "DAYS_30"},
+    ],
+    "TSLA": [
+        {"tier": "BULLS_EYE", "deviation": 0.1, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 0.25, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 0.55, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 0.9, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 0.25, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 0.55, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 1.2, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 2.0, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 0.35, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 0.8, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 1.7, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 2.85, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 0.5, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 1.15, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 2.45, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 4.1, "periodName": "DAYS_30"},
+    ],
+    "WTI": [
+        {"tier": "BULLS_EYE", "deviation": 0.45, "periodName": "HOURS_24"},
+        {"tier": "EXCELLENT", "deviation": 1.1, "periodName": "HOURS_24"},
+        {"tier": "GREAT", "deviation": 1.9, "periodName": "HOURS_24"},
+        {"tier": "GOOD", "deviation": 3.0, "periodName": "HOURS_24"},
+        {"tier": "BULLS_EYE", "deviation": 1.0, "periodName": "DAYS_7"},
+        {"tier": "EXCELLENT", "deviation": 2.4, "periodName": "DAYS_7"},
+        {"tier": "GREAT", "deviation": 4.25, "periodName": "DAYS_7"},
+        {"tier": "GOOD", "deviation": 6.8, "periodName": "DAYS_7"},
+        {"tier": "BULLS_EYE", "deviation": 1.4, "periodName": "DAYS_14"},
+        {"tier": "EXCELLENT", "deviation": 3.3, "periodName": "DAYS_14"},
+        {"tier": "GREAT", "deviation": 5.8, "periodName": "DAYS_14"},
+        {"tier": "GOOD", "deviation": 9.3, "periodName": "DAYS_14"},
+        {"tier": "BULLS_EYE", "deviation": 2.1, "periodName": "DAYS_30"},
+        {"tier": "EXCELLENT", "deviation": 4.9, "periodName": "DAYS_30"},
+        {"tier": "GREAT", "deviation": 8.75, "periodName": "DAYS_30"},
+        {"tier": "GOOD", "deviation": 14.0, "periodName": "DAYS_30"},
     ],
 }
 
@@ -818,6 +1281,8 @@ if st.button("🚀 Run All-Assets Analysis"):
 
             fmt_p = "${:,.4f}" if price < 1 else "${:,.2f}"
             sub = {"Asset": asset_name, "Anchor": fmt_p.format(price)}
+            if ticker in UNVERIFIED_TICKERS:
+                sub["Anchor"] = "⚠️ " + sub["Anchor"]
             if use_live:
                 sub["Staleness"] = (
                     f"{gap_pct:+.2f}% ({live_src})" if live else "— stale close"
@@ -865,6 +1330,11 @@ if st.button("🚀 Run All-Assets Analysis"):
     if submission_rows:
         st.subheader("Values to submit")
         st.dataframe(pd.DataFrame(submission_rows), use_container_width=True, hide_index=True)
+        st.caption(
+            "⚠️ marks a ticker where the Yahoo symbol may not be the instrument "
+            "SafeBets quotes — check that anchor against the platform tile before "
+            "submitting, or type the tile price in by hand."
+        )
 
         st.subheader("Did the model beat 'just enter today's price'?")
         st.dataframe(pd.DataFrame(diagnostic_rows), use_container_width=True, hide_index=True)
@@ -987,23 +1457,51 @@ if st.button("🎯 Rank by today's conditions"):
                 "the window reopens daily, so skipping one costs nothing."
             )
 
-            # Show whether the vol forecast actually works on this data.
-            checks = []
+            # Does the vol forecast work? Checked at EVERY horizon, not just 30D:
+            # persistence is strong over days and washes out over weeks, so the
+            # answer can differ completely across the four windows.
+            check_rows, ratios_by_period = [], {p: [] for p in PERIOD_DAYS}
             for asset_name, ticker in covered:
                 stt = conditional_vol_state(ticker)
-                if stt and 'DAYS_30' in stt:
-                    checks.append((asset_name, stt['DAYS_30']['calm_move'],
-                                   stt['DAYS_30']['rough_move'], stt['DAYS_30']['ratio']))
-            if checks:
-                st.markdown("**Does the volatility forecast actually work?** "
-                            "Average realised 30-day move on days the model called calm "
-                            "versus turbulent, out of sample:")
-                st.dataframe(pd.DataFrame(
-                    [{"Asset": a, "Calm days": f"{c:.1f}%", "Turbulent days": f"{r:.1f}%",
-                      "Ratio": f"{ratio:.2f}x"} for a, c, r, ratio in checks]
-                ), use_container_width=True, hide_index=True)
-                st.caption(
-                    "A ratio meaningfully above 1.0 means the forecast separates calm "
-                    "from turbulent periods, and the timing edge is real. Near 1.0 means "
-                    "it does not, and you should ignore the signal column."
+                if not stt:
+                    continue
+                row = {"Asset": asset_name}
+                for period in ['HOURS_24', 'DAYS_7', 'DAYS_14', 'DAYS_30']:
+                    if period in stt and np.isfinite(stt[period]['ratio']):
+                        r = stt[period]['ratio']
+                        ratios_by_period[period].append(r)
+                        flag = "✓" if r >= 1.15 else ("~" if r >= 1.05 else "✗")
+                        row[period] = f"{flag} {r:.2f}x"
+                    else:
+                        row[period] = "n/a"
+                check_rows.append(row)
+
+            if check_rows:
+                st.markdown(
+                    "**Does the volatility forecast actually work?** Ratio of the "
+                    "average realised move on turbulent days versus calm days, out of "
+                    "sample, per horizon. Above 1.0 means the forecast separates the "
+                    "two and the timing signal is real."
+                )
+                st.dataframe(pd.DataFrame(check_rows), use_container_width=True, hide_index=True)
+
+                verdicts = []
+                for period in ['HOURS_24', 'DAYS_7', 'DAYS_14', 'DAYS_30']:
+                    vals = ratios_by_period[period]
+                    if not vals:
+                        continue
+                    med = float(np.median(vals))
+                    if med >= 1.15:
+                        verdicts.append(f"**{period}: use it** (median {med:.2f}x)")
+                    elif med >= 1.05:
+                        verdicts.append(f"{period}: marginal ({med:.2f}x)")
+                    else:
+                        verdicts.append(f"{period}: **ignore the signal** ({med:.2f}x)")
+                st.markdown(
+                    "Verdict per horizon — " + " · ".join(verdicts) +
+                    "\n\nWhere the verdict is *ignore*, disregard the calm/turbulent "
+                    "column above and use the unconditional ranking instead. A ratio "
+                    "at or below 1.0 means the forecast has no skill at that horizon, "
+                    "so skipping a slot on its say-so costs you expected value for "
+                    "nothing. ✓ = 1.15x or better, ~ = 1.05-1.15x, ✗ = below 1.05x."
                 )
